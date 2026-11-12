@@ -3,6 +3,9 @@
 .dashboard-toolbar>span { font-size:13px;color:#78876a; }
 .dashboard-toolbar small { margin-left:5px;color:#9aa88b; }
 .dashboard-toolbar .secondary { padding:7px 12px;font-size:12px; }
+.dashboard-actions { display:flex;align-items:center;gap:9px; }
+.widget-reset { display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:5px;padding:0;background:transparent;color:#6e845e; }
+.widget-reset:hover { background:#eaf0e2; }
 .widget-grid { display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px;align-items:start;min-height:50px; }
 .dashboard-widget { display:flex;flex-direction:column;position:relative;min-width:0;border:1px solid #dfe6d6;border-radius:10px;background:#fdfefa;overflow:hidden;container-type:inline-size; }
 .widget-header { display:flex;align-items:center;gap:6px;min-height:38px;flex-shrink:0;padding:5px 9px;background:#f0f4ea;border-bottom:1px solid #e4eadc; }

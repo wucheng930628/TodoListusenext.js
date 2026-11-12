@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { reorderWidgets, widgetCatalog, WidgetContent, WidgetSettings } from "./widgets";
+import { defaultWidgetLayout, reorderWidgets, widgetCatalog, WidgetContent, WidgetSettings } from "./widgets";
 import "./widget-dashboard.css";
 
 const dragType = "application/x-slowly-widget";
@@ -119,7 +119,7 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
 
   function createWidget(type, beforeId) {
     if (!ready || !widgetCatalog.some(item => item.type === type)) return;
-    const widget = { id: crypto.randomUUID(), type, span: 6, height: type === "analytics" ? 320 : 260, config: {} };
+    const widget = { id: crypto.randomUUID(), type, ...defaultWidgetLayout(type), config: {} };
     onChange(current => {
       const next = [...current];
       const index = next.findIndex(item => item.id === beforeId);
@@ -140,7 +140,11 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
   }
 
   return <section className="widget-dashboard" aria-label="自訂小組件區">
-    <div className="dashboard-toolbar"><span>我的小組件 <small>{widgets.length}</small></span><button className="secondary" disabled={!ready} aria-expanded={libraryOpen} onClick={() => setLibraryOpen(value => !value)}>{libraryOpen ? "收起選單" : "＋ 新增小組件"}</button></div>
+    <div className="dashboard-toolbar"><span>我的小組件 <small>{widgets.length}</small></span><div className="dashboard-actions"><button className="widget-reset" disabled={!ready || !widgets.length} aria-label="清空全部小組件" title="清空全部小組件" onClick={() => {
+      if (!window.confirm("確定清空目前看板的全部小組件？快速筆記內容與小組件設定也會一併刪除。")) return;
+      onChange(() => []);
+      setMessage("全部小組件已清空。");
+    }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 10a8 8 0 1 0 .25 4" stroke="currentColor" strokeWidth="2.3"/><path d="M20 3v7h-7" stroke="currentColor" strokeWidth="2.3"/></svg></button><button className="secondary" disabled={!ready} aria-expanded={libraryOpen} onClick={() => setLibraryOpen(value => !value)}>{libraryOpen ? "收起選單" : "＋ 新增小組件"}</button></div></div>
     {libraryOpen && <section className="widget-library" aria-label="小組件選單">
       <div className="widget-library-grid">{widgetCatalog.map(entry => <article key={entry.type} className={`widget-library-card ${entry.type}`} draggable onDragStart={event => {
         event.dataTransfer.setData(dragType, JSON.stringify({ type: entry.type }));

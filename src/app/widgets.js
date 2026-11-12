@@ -10,6 +10,10 @@ export const widgetCatalog = [
   { type: "note", name: "快速筆記", icon: "▤", description: "隨手記下這個看板的想法" },
 ];
 
+export function defaultWidgetLayout(type) {
+  return { span: 6, height: type === "analytics" ? 320 : 260 };
+}
+
 export function boardWidgets(board) {
   if (Array.isArray(board.widgets)) {
     return board.widgets.filter(widget => widget && typeof widget.id === "string" && widgetCatalog.some(item => item.type === widget.type)).map(widget => ({
