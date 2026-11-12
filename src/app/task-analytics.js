@@ -81,15 +81,19 @@ export function fitAnalyticsSize(width, height, availableWidth) {
   return { width: fittedWidth, height: Math.min(480, Math.max(fittedWidth < 640 ? 260 : 124, height)) };
 }
 
-export default function TaskAnalytics({ tasks, now, size, onResize }) {
+export default function TaskAnalytics({ tasks, now, size, onResize, embedded = false }) {
   const panel = useRef(null);
   const drag = useRef(null);
   const [dimensions, setDimensions] = useState(size || null);
   const [measuredWidth, setMeasuredWidth] = useState(800);
+  const [measuredHeight, setMeasuredHeight] = useState(124);
 
   useEffect(() => {
     if (!panel.current) return;
-    const observer = new ResizeObserver(([entry]) => setMeasuredWidth(entry.contentRect.width));
+    const observer = new ResizeObserver(([entry]) => {
+      setMeasuredWidth(entry.contentRect.width);
+      setMeasuredHeight(entry.contentRect.height);
+    });
     observer.observe(panel.current);
     return () => observer.disconnect();
   }, [now === null]);
@@ -135,9 +139,9 @@ export default function TaskAnalytics({ tasks, now, size, onResize }) {
   const maximum = Math.max(1, ...stats.days.map(day => day.count));
   const sevenDayTotal = stats.days.reduce((total, day) => total + day.count, 0);
   const compact = measuredWidth < 600;
-  const height = Math.max(compact ? 260 : 124, dimensions?.height || 124);
+  const height = embedded ? measuredHeight : Math.max(compact ? 260 : 124, dimensions?.height || 124);
   const scale = Math.min(1.6, Math.max(.9, Math.min(measuredWidth / (compact ? 340 : 800), height / (compact ? 260 : 124))));
-  return <section ref={panel} className={`task-analytics${compact ? " compact" : ""}`} style={{ width: dimensions?.width || "100%", height, "--analytics-scale": scale }} aria-label="任務完成統計" title={`本週從週一開始，連續完成天數由今天或昨天往前計算。${stats.unknownDates > 0 ? `另有 ${stats.unknownDates} 項既有完成任務缺少完成日期，計入整體完成率。` : ""}`}>
+  return <section ref={panel} className={`task-analytics${compact ? " compact" : ""}${embedded ? " embedded" : ""}`} style={{ width: embedded ? "100%" : dimensions?.width || "100%", height: embedded ? "100%" : height, "--analytics-scale": scale }} aria-label="任務完成統計" title={`本週從週一開始，連續完成天數由今天或昨天往前計算。${stats.unknownDates > 0 ? `另有 ${stats.unknownDates} 項既有完成任務缺少完成日期，計入整體完成率。` : ""}`}>
     <div className="analytics-content">
     <div className="analytics-layout">
       <div className="analytics-chart">
@@ -161,6 +165,6 @@ export default function TaskAnalytics({ tasks, now, size, onResize }) {
       <div><span className="analytics-metric-icon streak-icon">ϟ</span><div><span>連續完成</span><strong>{stats.streak}<small>天</small></strong></div></div>
     </div>
     </div>
-    <button className="analytics-resize" aria-label="調整統計大小，可拖曳或使用方向鍵" title="拖曳調整大小，或使用方向鍵" onPointerDown={startResize} onPointerMove={resize} onPointerUp={finishResize} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }} onKeyDown={resizeWithKeyboard}>⤡</button>
+    {!embedded && <button className="analytics-resize" aria-label="調整統計大小，可拖曳或使用方向鍵" title="拖曳調整大小，或使用方向鍵" onPointerDown={startResize} onPointerMove={resize} onPointerUp={finishResize} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }} onKeyDown={resizeWithKeyboard}>⤡</button>}
   </section>;
 }

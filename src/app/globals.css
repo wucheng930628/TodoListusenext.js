@@ -258,7 +258,7 @@ main {
 }
 .content {
   padding:42px 43px 24px;
-  max-width:1500px;
+  max-width:none;
   margin:auto
 }
 .page-heading {
