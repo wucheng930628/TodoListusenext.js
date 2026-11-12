@@ -30,7 +30,7 @@ export function fillWidgetRows(widgets, gridWidth) {
       const span = index === items.length - 1 ? 12 - assigned : Math.round(item.span / total * 12);
       assigned += span;
       const width = (gridWidth + 14) * span / 12 - 14;
-      const minimum = item.type === "analytics" && width < 642 ? 320 : item.type === "timer" ? 260 : 170;
+      const minimum = item.type === "analytics" ? (width < 642 ? 380 : 230) : item.type === "timer" ? 260 : 170;
       return { id: item.id, span, height: Math.max(minimum, item.height) };
     });
     const height = Math.max(...fitted.map(item => item.height));
