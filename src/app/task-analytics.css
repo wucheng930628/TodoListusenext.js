@@ -23,15 +23,15 @@
 .analytics-bar.today { background:#7755b8; }
 .analytics-bar-column time { font-size:calc(10px * var(--analytics-scale));color:#7c896f;white-space:nowrap; }
 .analytics-rings { display:flex;align-items:center;gap:16px;flex:1.5;min-width:0;padding-left:14px;border-left:1px solid #e0e5d8; }
-.analytics-ring-card { flex:1;display:flex;align-items:center;gap:9px; }
-.analytics-ring { --ring-color:#83a66c;flex-shrink:0;width:calc(44px * var(--analytics-scale));height:calc(44px * var(--analytics-scale));border-radius:50%;background:conic-gradient(var(--ring-color) var(--progress),#e8edde 0);display:grid;place-items:center;position:relative; }
+.analytics-ring-card { flex:1;display:flex;align-items:center;justify-content:center;gap:14px; }
+.analytics-ring { --ring-color:#83a66c;flex-shrink:0;width:calc(64px * var(--analytics-scale));height:calc(64px * var(--analytics-scale));border-radius:50%;background:conic-gradient(var(--ring-color) var(--progress),#e8edde 0);display:grid;place-items:center;position:relative; }
 .analytics-ring::before { content:"";position:absolute;inset:4px;background:#f9fbf5;border-radius:50%; }
-.analytics-ring>span { position:relative;font-size:calc(14px * var(--analytics-scale));color:#536d46;font-variant-numeric:tabular-nums; }
-.analytics-ring small { font-size:calc(9px * var(--analytics-scale)); }
+.analytics-ring>span { position:relative;font-size:calc(20px * var(--analytics-scale));color:#536d46;font-variant-numeric:tabular-nums; }
+.analytics-ring small { font-size:calc(12px * var(--analytics-scale)); }
 .analytics-ring.purple { --ring-color:#a28bcc; }
 .analytics-ring.purple>span { color:#8065ad; }
-.analytics-ring-card h3 { margin:0;font-size:calc(12px * var(--analytics-scale));font-weight:550;white-space:nowrap; }
-.analytics-ring-card p { margin:4px 0 0;font-size:calc(10px * var(--analytics-scale));color:#7c896f;line-height:1.5; }
+.analytics-ring-card h3 { margin:0;font-size:calc(15px * var(--analytics-scale));font-weight:550;white-space:nowrap; }
+.analytics-ring-card p { margin:6px 0 0;font-size:calc(12px * var(--analytics-scale));color:#7c896f;line-height:1.5; }
 .analytics-metrics { display:flex;align-items:center;justify-content:space-around;gap:16px;flex:1.2;min-width:0;padding-left:14px;border-left:1px solid #e0e5d8; }
 .analytics-metrics>div { display:flex;align-items:center;gap:7px; }
 .analytics-metric-icon { display:grid;place-items:center;width:24px;height:24px;border-radius:6px;background:#eaf2e2;color:#789960;font-size:calc(16px * var(--analytics-scale)); }
