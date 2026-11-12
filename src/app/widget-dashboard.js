@@ -24,17 +24,22 @@ export function fillWidgetRows(widgets, gridWidth) {
 
   const layout = new Map();
   for (const items of rows) {
-    const total = items.reduce((sum, item) => sum + item.span, 0);
-    let assigned = 0;
-    const fitted = items.map((item, index) => {
-      const span = index === items.length - 1 ? 12 - assigned : Math.round(item.span / total * 12);
-      assigned += span;
+    const automatic = items.filter(item => !item.manualSize);
+    let remainingColumns = 12 - items.filter(item => item.manualSize).reduce((sum, item) => sum + item.span, 0);
+    let remainingWeight = automatic.reduce((sum, item) => sum + item.span, 0);
+    const fitted = items.map(item => {
+      let span = item.span;
+      if (!item.manualSize) {
+        span = Math.round(item.span / remainingWeight * remainingColumns);
+        remainingColumns -= span;
+        remainingWeight -= item.span;
+      }
       const width = (gridWidth + 14) * span / 12 - 14;
       const minimum = item.type === "analytics" ? (width < 642 ? 380 : 230) : item.type === "timer" ? 260 : 170;
-      return { id: item.id, span, height: Math.max(minimum, item.height) };
+      return { id: item.id, span, manualSize: item.manualSize, height: item.manualSize ? item.height : Math.max(minimum, item.height) };
     });
-    const height = Math.max(...fitted.map(item => item.height));
-    for (const item of fitted) layout.set(item.id, { span: item.span, height });
+    const automaticHeight = Math.max(170, ...fitted.filter(item => !item.manualSize).map(item => item.height));
+    for (const item of fitted) layout.set(item.id, { span: item.span, height: item.manualSize ? item.height : automaticHeight });
   }
   return layout;
 }
@@ -90,7 +95,7 @@ function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemov
       event.currentTarget.setPointerCapture(event.pointerId);
     }} onPointerMove={updateResize} onPointerUp={event => {
       const next = updateResize(event);
-      if (next) onUpdate(current => ({ ...current, ...next }));
+      if (next) onUpdate(current => ({ ...current, ...next, manualSize: true }));
       drag.current = null;
       setPreview(null);
     }} onPointerCancel={() => { drag.current = null; setPreview(null); }} onLostPointerCapture={() => { drag.current = null; setPreview(null); }} onKeyDown={event => {
@@ -99,7 +104,7 @@ function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemov
       event.preventDefault();
       const [horizontal, vertical] = steps[event.key];
       const next = resizeWidget(fitted.span, frame.current.getBoundingClientRect().height, horizontal * grid.current.clientWidth / 12, vertical, grid.current.clientWidth);
-      onUpdate(current => ({ ...current, ...next }));
+      onUpdate(current => ({ ...current, ...next, manualSize: true }));
     }}>⤡</button>
   </section>;
 }
