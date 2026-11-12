@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 const columns = [{ id: "todo", name: "待處理", en: "REQUESTED" }, { id: "doing", name: "進行中", en: "IN PROGRESS" }, { id: "done", name: "已完成", en: "DONE" }];
-const blank = { title: "", description: "", status: "todo", tag: "個人", priority: "一般", urgent: false, date: "" };
+const blank = { title: "", description: "", status: "todo", tag: "個人", priority: "一般", urgent: false, date: "", time: "" };
 const initial = [
     { id: "1", title: "整理本週的靈感與想法", description: "把腦海中的點子記錄下來，為新的一週留一點空間。", tag: "個人", status: "todo" },
     { id: "2", title: "規劃個人作品集", description: "挑選喜歡的作品，整理專案故事與設計過程。", tag: "設計", status: "todo", priority: "高" },
@@ -17,12 +17,38 @@ function isTask(task) {
         typeof task.description === "string" && columns.some(column => column.id === task.status);
 }
 
+function isOverdue(task, now) {
+    if (!task.date || task.status === "done" || now === null) return false;
+
+    const deadline = new Date(`${task.date}T${task.time || "00:00"}`);
+    if (!task.time) deadline.setDate(deadline.getDate() + 1);
+    return now >= deadline.getTime();
+}
+
+function TaskDeadline({ task, now }) {
+    if (!task.date) return null;
+
+    const overdue = isOverdue(task, now);
+    const dateTime = task.time ? `${task.date}T${task.time}` : task.date;
+    return (
+        <time
+            className={overdue ? "deadline overdue" : "deadline"}
+            dateTime={dateTime}
+            title={`截止 ${task.date}${task.time ? ` ${task.time}` : "（當天結束）"}`}
+        >
+            {overdue && <span>已逾期 </span>}
+            {task.date.slice(5).replace("-", "/")}{task.time && ` ${task.time}`}
+        </time>
+    );
+}
+
 export default function Home() {
     const [workspace, setWorkspace] = useState({
         activeBoardId: "default",
         boards: [{ id: "default", name: "我的看板", description: "把想法化為行動，照自己的步調前進。", wipLimit: 4, tasks: initial }],
     });
     const [ready, setReady] = useState(false);
+    const [now, setNow] = useState(null);
     const [query, setQuery] = useState("");
     const [filter, setFilter] = useState("全部任務");
     const [draft, setDraft] = useState(null);
@@ -34,6 +60,13 @@ export default function Home() {
     const boardDialog = useRef(null);
     const board = workspace.boards.find(item => item.id === workspace.activeBoardId) || workspace.boards[0];
     const tasks = board.tasks;
+
+    useEffect(() => {
+        const updateClock = () => setNow(Date.now());
+        updateClock();
+        const timer = setInterval(updateClock, 1000);
+        return () => clearInterval(timer);
+    }, []);
 
     function setNotice(message) {
         setNotification(message ? { message } : null);
@@ -162,10 +195,10 @@ export default function Home() {
         return; if (draft.status === "doing" && tasks.find(t => t.id === draft.id)?.status !== "doing" && doing >= board.wipLimit) {
         setNotice(`進行中已達 ${board.wipLimit} 項上限，請選擇其他狀態。`);
         return;
-    } const task = { ...draft, title: draft.title.trim(), description: draft.description.trim(), id: draft.id || crypto.randomUUID() }; setTasks(items => draft.id ? items.map(t => t.id === draft.id ? task : t) : [...items, task]); setDraft(null); setNotice("任務已儲存。"); }
-    function column(c, urgent) { const visible = tasks.filter(t => t.status === c.id && t.urgent === urgent && (filter !== "高優先" || t.priority === "高") && (filter !== "未完成" || t.status !== "done") && `${t.title} ${t.description} ${t.tag}`.toLowerCase().includes(query.toLowerCase())); return <section className={`column ${c.id}`} key={c.id} aria-label={`${urgent ? "優先" : "一般"}${c.name}`} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); move(e.dataTransfer.getData("text/plain"), c.id, urgent); }}>{!urgent && <header className="column-header"><div><i /><h2>{c.name}</h2><b>{tasks.filter(t => t.status === c.id).length}</b>{c.id === "doing" && <small>WIP {doing}/{board.wipLimit}</small>}</div><span>{c.en}</span></header>}<div className="cards">{visible.map(t => <article className="task-card" key={t.id} draggable onDragStart={e => { e.dataTransfer.setData("text/plain", t.id); e.dataTransfer.effectAllowed = "move"; }}><div className="card-top"><span className={`tag tag-${t.tag}`}>{t.tag}</span><button aria-label={`編輯 ${t.title}`} onClick={() => setDraft({ ...t })}>•••</button></div><button className="task-title" onClick={() => setDraft({ ...t })}>{t.status === "done" && <span className="check">✓ </span>}{t.title}</button><p>{t.description || "為這件任務補充一點細節…"}</p><div className="card-bottom"><span className={t.priority === "高" ? "high" : ""}>⚑ {t.priority}優先</span>{t.date && <time dateTime={t.date}>{t.date.slice(5).replace("-", "/")}</time>}<select aria-label={`移動 ${t.title}`} value={t.status} onChange={e => move(t.id, e.target.value, t.urgent)}>{columns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div></article>)}{!visible.length && <div className="empty">{query || filter !== "全部任務" ? "沒有符合的任務" : "留點空間，給下一個想法"}</div>}</div><button className="add-card" disabled={!ready} onClick={() => setDraft({ ...blank, status: c.id, urgent })}>＋ 新增任務</button></section>; }
+    } const task = { ...draft, title: draft.title.trim(), description: draft.description.trim(), time: draft.date ? draft.time || "" : "", id: draft.id || crypto.randomUUID() }; setTasks(items => draft.id ? items.map(t => t.id === draft.id ? task : t) : [...items, task]); setDraft(null); setNotice("任務已儲存。"); }
+    function column(c, urgent) { const visible = tasks.filter(t => t.status === c.id && t.urgent === urgent && (filter !== "高優先" || t.priority === "高") && (filter !== "未完成" || t.status !== "done") && `${t.title} ${t.description} ${t.tag}`.toLowerCase().includes(query.toLowerCase())); return <section className={`column ${c.id}`} key={c.id} aria-label={`${urgent ? "優先" : "一般"}${c.name}`} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); move(e.dataTransfer.getData("text/plain"), c.id, urgent); }}>{!urgent && <header className="column-header"><div><i /><h2>{c.name}</h2><b>{tasks.filter(t => t.status === c.id).length}</b>{c.id === "doing" && <small>WIP {doing}/{board.wipLimit}</small>}</div><span>{c.en}</span></header>}<div className="cards">{visible.map(t => <article className="task-card" key={t.id} draggable onDragStart={e => { e.dataTransfer.setData("text/plain", t.id); e.dataTransfer.effectAllowed = "move"; }}><div className="card-top"><span className={`tag tag-${t.tag}`}>{t.tag}</span><button aria-label={`編輯 ${t.title}`} onClick={() => setDraft({ ...t })}>•••</button></div><button className="task-title" onClick={() => setDraft({ ...t })}>{t.status === "done" && <span className="check">✓ </span>}{t.title}</button><p>{t.description || "為這件任務補充一點細節…"}</p><div className="card-bottom"><span className={t.priority === "高" ? "high" : ""}>⚑ {t.priority}優先</span><TaskDeadline task={t} now={now} /><select aria-label={`移動 ${t.title}`} value={t.status} onChange={e => move(t.id, e.target.value, t.urgent)}>{columns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div></article>)}{!visible.length && <div className="empty">{query || filter !== "全部任務" ? "沒有符合的任務" : "留點空間，給下一個想法"}</div>}</div><button className="add-card" disabled={!ready} onClick={() => setDraft({ ...blank, status: c.id, urgent })}>＋ 新增任務</button></section>; }
     return <div className="shell"><aside><a href="/" className="brand"><span className="brand-mark">s·</span>slowly.</a><div className="workspace">我的工作空間</div><nav className="board-nav" aria-label="看板清單">{workspace.boards.map(item => <button key={item.id} className={item.id === board.id ? "board-link active-nav" : "board-link"} aria-current={item.id === board.id ? "page" : undefined} onClick={() => selectBoard(item.id)}><span aria-hidden="true">▦</span><span className="board-name">{item.name}</span><small>{item.tasks.length}</small></button>)}</nav><button className="new-board" disabled={!ready} onClick={() => openBoardSettings()}>＋ 新增看板</button><div className="sidebar-note"><span>✳</span><p>一步一步，<br />也能走得很遠。</p><small>● 本機工作空間</small></div><div className="profile"><span>我</span><div>我的空間<small>保持自己的節奏</small></div></div></aside><main><header className="topbar"><div>工作空間 <span>/</span> <strong>{board.name}</strong></div><small>● {ready ? "已儲存於此瀏覽器" : "載入中"}</small></header><div className="content"><div className="page-heading"><div><div className="eyebrow">A LITTLE PROGRESS, EVERY DAY</div><h1>{board.name} <span>✳</span></h1>{board.description && <p>{board.description}</p>}</div><div className="heading-actions"><button className="secondary" disabled={!ready} onClick={() => openBoardSettings(board)}>看板設定</button><button className="primary" disabled={!ready} onClick={() => setDraft({ ...blank })}>＋ 新增任務</button></div></div><div className="mobile-boards"><select aria-label="切換看板" value={board.id} onChange={event => selectBoard(event.target.value)}>{workspace.boards.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button className="secondary" disabled={!ready} onClick={() => openBoardSettings()}>＋ 新增看板</button></div><section className="overview" aria-label="任務統計"><div className="overview-intro"><span>◷</span><div><strong>每一步，都算數。</strong><p>專注眼前的小事，累積日常的進展。</p></div></div><div className="stat"><strong>{String(tasks.length).padStart(2, "0")}</strong><span>全部任務</span></div><div className="stat"><strong>{String(doing).padStart(2, "0")}</strong><span>進行中</span></div><div className="progress-stat"><div>完成進度 <strong>{progress}%</strong></div><div className="track"><span style={{ width: `${progress}%` }}/></div><small>{done} / {tasks.length} 項任務已完成</small></div></section><div className="toolbar"><div className="tabs">{["全部任務", "未完成", "高優先"].map(f => <button key={f} className={filter === f ? "selected" : ""} onClick={() => setFilter(f)}>{f}{f === "全部任務" && <span>{tasks.length}</span>}</button>)}</div><label className="search"><span>⌕</span><input aria-label="搜尋任務" placeholder="搜尋任務…" value={query} onChange={e => setQuery(e.target.value)}/></label></div><div className="board-grid">{columns.map(c => column(c, false))}</div><div className="swimlane-heading"><div><span>ϟ</span><h2>優先處理</h2><small>EXPEDITE</small></div><p>留給需要先完成的重要任務</p></div><div className="board-grid urgent">{columns.map(c => column(c, true))}</div><footer><span>⠿ 拖曳卡片即可移動任務，也可使用卡片上的狀態選單</span><span>慢慢來，比較快。 ✳</span></footer></div></main>{notice && <div className="toast" role="status">{notice}<button aria-label="關閉通知" onClick={() => setNotice("")}>×</button></div>}<dialog ref={dialog} onCancel={() => setDraft(null)} onClick={e => { if (e.target === dialog.current)
-        setDraft(null); }}>{draft && <form onSubmit={save}><div className="modal-heading"><h2>{draft.id ? "編輯任務" : "新的小小目標"}</h2><button type="button" aria-label="關閉" onClick={() => setDraft(null)}>×</button></div><label>任務名稱<input autoFocus required maxLength={100} placeholder="你想完成什麼？" value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })}/></label><label>任務描述<textarea rows={3} maxLength={1000} placeholder="記下細節，讓下一步更清楚…" value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })}/></label><div className="form-row"><label>狀態<select value={draft.status} onChange={e => setDraft({ ...draft, status: e.target.value })}>{columns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>分類<select value={draft.tag} onChange={e => setDraft({ ...draft, tag: e.target.value })}>{["個人", "工作", "設計", "開發", "生活"].map(v => <option key={v}>{v}</option>)}</select></label></div><div className="form-row"><label>優先程度<select value={draft.priority} onChange={e => setDraft({ ...draft, priority: e.target.value })}>{["低", "一般", "高"].map(v => <option key={v}>{v}</option>)}</select></label><label>截止日期<input type="date" value={draft.date} onChange={e => setDraft({ ...draft, date: e.target.value })}/></label></div><label className="checkbox"><input type="checkbox" checked={draft.urgent} onChange={e => setDraft({ ...draft, urgent: e.target.checked })}/>放入優先處理泳道</label><div className="modal-actions">{draft.id && <button type="button" className="delete" onClick={() => { if (window.confirm(`確定刪除「${draft.title}」？`)) {
+        setDraft(null); }}>{draft && <form onSubmit={save}><div className="modal-heading"><h2>{draft.id ? "編輯任務" : "新的小小目標"}</h2><button type="button" aria-label="關閉" onClick={() => setDraft(null)}>×</button></div><label>任務名稱<input autoFocus required maxLength={100} placeholder="你想完成什麼？" value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })}/></label><label>任務描述<textarea rows={3} maxLength={1000} placeholder="記下細節，讓下一步更清楚…" value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })}/></label><div className="form-row"><label>狀態<select value={draft.status} onChange={e => setDraft({ ...draft, status: e.target.value })}>{columns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>分類<select value={draft.tag} onChange={e => setDraft({ ...draft, tag: e.target.value })}>{["個人", "工作", "設計", "開發", "生活"].map(v => <option key={v}>{v}</option>)}</select></label></div><div className="form-row"><label>優先程度<select value={draft.priority} onChange={e => setDraft({ ...draft, priority: e.target.value })}>{["低", "一般", "高"].map(v => <option key={v}>{v}</option>)}</select></label></div><div className="form-row"><label>截止日期<input type="date" value={draft.date} onChange={event => setDraft({ ...draft, date: event.target.value, time: event.target.value ? draft.time : "" })}/></label><label>截止時間（選填）<input type="time" step={60} disabled={!draft.date} value={draft.time || ""} onChange={event => setDraft({ ...draft, time: event.target.value })}/></label></div><label className="checkbox"><input type="checkbox" checked={draft.urgent} onChange={e => setDraft({ ...draft, urgent: e.target.checked })}/>放入優先處理泳道</label><div className="modal-actions">{draft.id && <button type="button" className="delete" onClick={() => { if (window.confirm(`確定刪除「${draft.title}」？`)) {
         setTasks(items => items.filter(t => t.id !== draft.id));
         setDraft(null);
         setNotice("任務已刪除。");

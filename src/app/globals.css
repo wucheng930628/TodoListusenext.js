@@ -585,6 +585,7 @@ h1 span {
 }
 .card-bottom {
   display:flex;
+  flex-wrap:wrap;
   align-items:center;
   gap:6px;
   padding-top:10px;
@@ -606,7 +607,18 @@ h1 span {
   max-width:75px
 }
 .card-bottom time {
-  font-size:8px
+  font-size:12px;
+  line-height:1.6;
+  color:#748267;
+}
+.card-bottom .deadline.overdue {
+  color:#b34f43;
+  font-weight:600;
+}
+input:disabled {
+  background:#f0f2eb;
+  color:#8b9580;
+  cursor:not-allowed;
 }
 .add-card {
   background:none;
