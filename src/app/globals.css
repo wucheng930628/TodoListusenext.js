@@ -67,9 +67,9 @@ aside {
 }
 .workspace {
   margin:52px 12px 17px;
-  font-size:10px;
-  letter-spacing:2px;
-  color:#979f8e
+  font-size:14px;
+  letter-spacing:1px;
+  color:#738168
 }
 .active-nav {
   display:flex;
@@ -109,8 +109,9 @@ aside {
   margin:8px 0 28px
 }
 .sidebar-note small {
-  font-size:9px;
-  color:#98a18d
+  font-size:13px;
+  line-height:1.6;
+  color:#738168
 }
 .profile {
   border-top:1px solid #dfe4d8;
@@ -236,12 +237,13 @@ h1 span {
   border-radius:50%
 }
 .overview-intro strong {
-  font-size:13px;
+  font-size:17px;
   letter-spacing:.5px
 }
 .overview-intro p {
-  font-size:10px;
-  color:#979f8c;
+  font-size:14px;
+  line-height:1.7;
+  color:#76836b;
   margin:6px 0 0
 }
 .stat {
@@ -256,14 +258,16 @@ h1 span {
   line-height:1.1
 }
 .stat>span {
-  font-size:10px;
-  color:#969f88
+  font-size:14px;
+  white-space:nowrap;
+  color:#748267
 }
 .progress-stat {
   border-left:1px solid #dce3cf;
   padding-left:28px;
-  width:169px;
-  font-size:10px
+  width:200px;
+  flex-shrink:0;
+  font-size:14px
 }
 .progress-stat>div:first-child {
   display:flex;
@@ -271,7 +275,7 @@ h1 span {
   align-items:center
 }
 .progress-stat strong {
-  font-size:14px;
+  font-size:18px;
   font-weight:500;
   color:#70885e
 }
@@ -290,8 +294,9 @@ h1 span {
   transition:width .3s
 }
 .progress-stat small {
-  font-size:9px;
-  color:#9aa58b
+  font-size:13px;
+  line-height:1.6;
+  color:#77866a
 }
 .toolbar {
   display:flex;
@@ -412,9 +417,10 @@ h1 span {
 }
 .column-header>span {
   display:block;
-  font-size:8px;
-  letter-spacing:1.6px;
-  color:#a0a596;
+  font-size:12px;
+  line-height:1.5;
+  letter-spacing:1.2px;
+  color:#79866e;
   margin:5px 0 0 15px
 }
 .cards {
@@ -528,17 +534,20 @@ h1 span {
 .add-card {
   background:none;
   border:0;
-  color:#9fa994;
-  font-size:10px;
+  color:#6d7c62;
+  font-size:16px;
+  line-height:1.6;
   text-align:left;
-  padding:15px 5px 3px;
+  padding:12px 8px;
+  min-height:48px;
   width:100%
 }
 .empty {
   padding:32px 3px;
   text-align:center;
-  font-size:10px;
-  color:#abb29f
+  font-size:16px;
+  line-height:1.7;
+  color:#77846c
 }
 .swimlane-heading {
   display:flex;
@@ -759,7 +768,7 @@ form textarea {
     min-width:45px
   }
   .progress-stat {
-    width:140px;
+    width:170px;
     padding-left:18px
   }
   .board-grid {
