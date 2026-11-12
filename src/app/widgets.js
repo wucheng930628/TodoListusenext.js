@@ -71,7 +71,7 @@ function TimerWidget({ widget, tasks, now, onConfigure }) {
       {availableTasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}
     </select>
     <div className="timer-digits" role="timer" aria-label="專注剩餘時間">{String(Math.floor(remaining / 60)).padStart(2, "0")}<span>:</span>{String(remaining % 60).padStart(2, "0")}</div>
-    <p className="timer-status" role="status">{completed ? "本次專注完成，休息一下吧。" : running ? "專注當下，一次一件事。" : "準備好就開始吧。"}</p>
+    <p className="timer-status" role="status">{completed ? "專注完成" : running ? "專注中" : "尚未開始"}</p>
     <div className="timer-actions"><button className="primary" disabled={now === null} onClick={() => onConfigure(running
       ? { endsAt: null, remaining }
       : { endsAt: now + (remaining || (config.minutes || 25) * 60) * 1000, remaining: null })}>{running ? "暫停" : "開始專注"}</button>
@@ -91,7 +91,7 @@ export function WidgetContent({ widget, tasks, now, onEdit, onConfigure }) {
     case "today":
     case "upcoming": return <TaskListWidget widget={widget} tasks={tasks} now={now} onEdit={onEdit} />;
     case "timer": return <TimerWidget widget={widget} tasks={tasks} now={now} onConfigure={onConfigure} />;
-    case "note": return <textarea className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="記下想法、靈感或備忘…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
+    case "note": return <textarea className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="輸入筆記…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
     default: return null;
   }
 }

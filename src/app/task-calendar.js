@@ -120,7 +120,6 @@ export default function TaskCalendar({ tasks, view, now, ready, onCreate, onEdit
           }} />
         </div>
       </div>
-      <p className="calendar-hint">{view === "week" ? "任務依截止時間定位。點選時間格新增任務，點選卡片編輯。" : "依截止日期排列，點選日期新增任務，點選任務可編輯時間。"}</p>
       {view === "week" ? <div className="timeline-scroll" ref={timeline}>
         <div className="timeline-grid">
           <div className="timeline-header">

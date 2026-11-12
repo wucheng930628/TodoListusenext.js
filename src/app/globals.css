@@ -191,6 +191,7 @@ button:disabled {
   color:#738168
 }
 .profile {
+  margin-top:auto;
   border-top:1px solid #dfe4d8;
   padding:23px 0;
   display:flex;

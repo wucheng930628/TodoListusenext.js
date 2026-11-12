@@ -142,7 +142,6 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
   return <section className="widget-dashboard" aria-label="自訂小組件區">
     <div className="dashboard-toolbar"><span>我的小組件 <small>{widgets.length}</small></span><button className="secondary" disabled={!ready} aria-expanded={libraryOpen} onClick={() => setLibraryOpen(value => !value)}>{libraryOpen ? "收起選單" : "＋ 新增小組件"}</button></div>
     {libraryOpen && <section className="widget-library" aria-label="小組件選單">
-      <p>拖曳到下方區域，或點擊加入。</p>
       <div className="widget-library-grid">{widgetCatalog.map(entry => <article key={entry.type} className={`widget-library-card ${entry.type}`} draggable onDragStart={event => {
         event.dataTransfer.setData(dragType, JSON.stringify({ type: entry.type }));
         event.dataTransfer.effectAllowed = "copy";
@@ -164,7 +163,7 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
           [next[from], next[to]] = [next[to], next[from]];
           return next;
         })} />)}
-      {!widgets.length && <button className="widget-drop-empty" onClick={() => setLibraryOpen(true)}>＋ 新增小組件，或拖曳到這裡</button>}
+      {!widgets.length && <button className="widget-drop-empty" onClick={() => setLibraryOpen(true)}>＋ 新增小組件</button>}
     </div>
     <span className="widget-sr-only" role="status">{message}</span>
   </section>;
