@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import "./task-analytics.css";
 
 function localDay(date) {
@@ -75,12 +76,69 @@ function ProgressRing({ value, label, detail, tone }) {
   </div>;
 }
 
-export default function TaskAnalytics({ tasks, now }) {
+export function fitAnalyticsSize(width, height, availableWidth) {
+  const fittedWidth = Math.min(Math.max(320, width), availableWidth);
+  return { width: fittedWidth, height: Math.min(480, Math.max(fittedWidth < 640 ? 260 : 124, height)) };
+}
+
+export default function TaskAnalytics({ tasks, now, size, onResize }) {
+  const panel = useRef(null);
+  const drag = useRef(null);
+  const [dimensions, setDimensions] = useState(size || null);
+  const [measuredWidth, setMeasuredWidth] = useState(800);
+
+  useEffect(() => {
+    if (!panel.current) return;
+    const observer = new ResizeObserver(([entry]) => setMeasuredWidth(entry.contentRect.width));
+    observer.observe(panel.current);
+    return () => observer.disconnect();
+  }, [now === null]);
+
+  function startResize(event) {
+    if (event.button !== 0) return;
+    const bounds = panel.current.getBoundingClientRect();
+    drag.current = { x: event.clientX, y: event.clientY, width: bounds.width, height: bounds.height };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function resize(event) {
+    if (!drag.current) return;
+    const next = fitAnalyticsSize(
+      drag.current.width + event.clientX - drag.current.x,
+      drag.current.height + event.clientY - drag.current.y,
+      panel.current.parentElement.clientWidth,
+    );
+    setDimensions(next);
+    return next;
+  }
+
+  function finishResize(event) {
+    if (!drag.current) return;
+    const next = resize(event);
+    drag.current = null;
+    onResize(next);
+  }
+
+  function resizeWithKeyboard(event) {
+    const steps = { ArrowLeft: [-32, 0], ArrowRight: [32, 0], ArrowUp: [0, -24], ArrowDown: [0, 24] };
+    const step = steps[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const bounds = panel.current.getBoundingClientRect();
+    const next = fitAnalyticsSize(bounds.width + step[0], bounds.height + step[1], panel.current.parentElement.clientWidth);
+    setDimensions(next);
+    onResize(next);
+  }
+
   if (now === null) return <section className="task-analytics" aria-label="任務完成統計">正在載入統計…</section>;
   const stats = getAnalytics(tasks, now);
   const maximum = Math.max(1, ...stats.days.map(day => day.count));
   const sevenDayTotal = stats.days.reduce((total, day) => total + day.count, 0);
-  return <section className="task-analytics" aria-label="任務完成統計" title={`本週從週一開始，連續完成天數由今天或昨天往前計算。${stats.unknownDates > 0 ? `另有 ${stats.unknownDates} 項既有完成任務缺少完成日期，計入整體完成率。` : ""}`}>
+  const compact = measuredWidth < 600;
+  const height = Math.max(compact ? 260 : 124, dimensions?.height || 124);
+  const scale = Math.min(1.6, Math.max(.9, Math.min(measuredWidth / (compact ? 340 : 800), height / (compact ? 260 : 124))));
+  return <section ref={panel} className={`task-analytics${compact ? " compact" : ""}`} style={{ width: dimensions?.width || "100%", height, "--analytics-scale": scale }} aria-label="任務完成統計" title={`本週從週一開始，連續完成天數由今天或昨天往前計算。${stats.unknownDates > 0 ? `另有 ${stats.unknownDates} 項既有完成任務缺少完成日期，計入整體完成率。` : ""}`}>
+    <div className="analytics-content">
     <div className="analytics-layout">
       <div className="analytics-chart">
         <div className="analytics-chart-heading"><h3>近 7 天完成數</h3><span>共 <strong>{sevenDayTotal}</strong> 項</span></div>
@@ -102,6 +160,7 @@ export default function TaskAnalytics({ tasks, now }) {
       <div><span className="analytics-metric-icon overdue-icon">◷</span><div><span>逾期任務</span><strong>{stats.overdue}<small>項</small></strong></div></div>
       <div><span className="analytics-metric-icon streak-icon">ϟ</span><div><span>連續完成</span><strong>{stats.streak}<small>天</small></strong></div></div>
     </div>
-
+    </div>
+    <button className="analytics-resize" aria-label="調整統計大小，可拖曳或使用方向鍵" title="拖曳調整大小，或使用方向鍵" onPointerDown={startResize} onPointerMove={resize} onPointerUp={finishResize} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }} onKeyDown={resizeWithKeyboard}>⤡</button>
   </section>;
 }
