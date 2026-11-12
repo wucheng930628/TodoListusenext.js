@@ -93,6 +93,83 @@ aside {
   padding:1px 6px;
   font-size:10px
 }
+.board-nav {
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  max-height:40vh;
+  overflow-y:auto;
+}
+.board-link {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  width:100%;
+  min-height:54px;
+  flex-shrink:0;
+  text-align:left;
+  padding:13px 10px;
+  border:1px solid #dae2d1;
+  border-radius:6px;
+  background:#edf1e7;
+  color:#65775c;
+  font-size:14px;
+  line-height:1.5;
+}
+.board-link>span {
+  font-size:14px;
+  font-weight:500;
+}
+.board-link.active-nav {
+  background:#e3eadb;
+  border-color:#dae2d1;
+}
+.board-name {
+  min-width:0;
+  flex:1;
+  overflow-wrap:anywhere;
+}
+.board-link small {
+  margin-left:auto;
+  background:#dfe7d6;
+  border-radius:4px;
+  padding:1px 6px;
+  font-size:12px;
+}
+.new-board {
+  border:1px dashed #cbd6c1;
+  border-radius:6px;
+  background:transparent;
+  color:#647c56;
+  text-align:left;
+  margin-top:12px;
+  padding:12px 10px;
+  font-size:14px;
+}
+.heading-actions {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-shrink:0;
+}
+.page-heading>div:first-child {
+  min-width:0;
+}
+.page-heading h1,.page-heading p,.topbar strong {
+  overflow-wrap:anywhere;
+}
+.mobile-boards {
+  display:none;
+}
+.form-error {
+  color:#a45343;
+  font-size:13px;
+  line-height:1.6;
+}
+button:disabled {
+  cursor:wait;
+  opacity:.5;
+}
 .sidebar-note {
   margin-top:auto;
   padding:30px 12px
@@ -783,6 +860,23 @@ form textarea {
 
 }
 @media(max-width:800px) {
+  .board-nav,.new-board {
+    display:none;
+  }
+  .mobile-boards {
+    display:flex;
+    gap:10px;
+    margin-bottom:20px;
+  }
+  .mobile-boards select {
+    flex:1;
+    min-width:0;
+    border:1px solid #dce4d3;
+    border-radius:6px;
+    background:#fff;
+    color:#46573c;
+    padding:10px;
+  }
   aside {
     width:68px;
     padding:23px 16px
@@ -828,6 +922,13 @@ form textarea {
 
 }
 @media(max-width:520px) {
+  .page-heading {
+    flex-wrap:wrap;
+  }
+  .heading-actions {
+    width:100%;
+    justify-content:flex-end;
+  }
   aside {
     display:none
   }
