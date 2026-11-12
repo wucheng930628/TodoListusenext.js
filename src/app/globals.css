@@ -152,6 +152,21 @@ aside {
   gap:10px;
   flex-shrink:0;
 }
+.board-settings-button {
+  display:grid;
+  place-items:center;
+  width:48px;
+  height:48px;
+  padding:0;
+  border:0;
+  background:transparent;
+  color:#647c56;
+  font-size:34px;
+  line-height:1;
+}
+.board-settings-button:hover {
+  color:#354f2c;
+}
 .page-heading>div:first-child {
   min-width:0;
 }
