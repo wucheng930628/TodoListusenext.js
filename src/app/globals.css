@@ -241,6 +241,21 @@ main {
   font-size:9px;
   color:#91a17f
 }
+.topbar .topbar-info {
+  flex-direction:column;
+  align-items:flex-end;
+  gap:4px;
+  flex-shrink:0;
+}
+.current-time {
+  font-size:14px;
+  font-variant-numeric:tabular-nums;
+  color:#596f50;
+  white-space:nowrap;
+}
+.topbar>div:first-child {
+  min-width:0;
+}
 .content {
   padding:42px 43px 24px;
   max-width:1500px;
@@ -374,6 +389,29 @@ h1 span {
   font-size:13px;
   line-height:1.6;
   color:#77866a
+}
+.view-switch {
+  display:inline-flex;
+  gap:4px;
+  padding:4px;
+  margin-bottom:18px;
+  border:1px solid #dfe5d7;
+  border-radius:8px;
+  background:#eff3e9;
+}
+.view-switch button {
+  border:0;
+  border-radius:5px;
+  padding:9px 22px;
+  background:transparent;
+  color:#77866b;
+  font-size:14px;
+}
+.view-switch button.selected {
+  background:#fff;
+  color:#486c50;
+  box-shadow:0 1px 4px #34452315;
+  font-weight:600;
 }
 .toolbar {
   display:flex;
@@ -951,7 +989,11 @@ form textarea {
     padding:25px 16px
   }
   .topbar {
-    padding:0 17px
+    padding:0 17px;
+    gap:12px;
+  }
+  .current-time {
+    font-size:12px;
   }
   .topbar small {
     font-size:8px
