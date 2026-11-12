@@ -28,11 +28,23 @@ export default function Home() {
     const [draft, setDraft] = useState(null);
     const [boardDraft, setBoardDraft] = useState(null);
     const [boardError, setBoardError] = useState("");
-    const [notice, setNotice] = useState("");
+    const [notification, setNotification] = useState(null);
+    const notice = notification?.message || "";
     const dialog = useRef(null);
     const boardDialog = useRef(null);
     const board = workspace.boards.find(item => item.id === workspace.activeBoardId) || workspace.boards[0];
     const tasks = board.tasks;
+
+    function setNotice(message) {
+        setNotification(message ? { message } : null);
+    }
+
+    useEffect(() => {
+        if (!notification) return;
+
+        const timer = setTimeout(() => setNotification(null), 3000);
+        return () => clearTimeout(timer);
+    }, [notification]);
 
     function setTasks(update) {
         setWorkspace(current => ({
