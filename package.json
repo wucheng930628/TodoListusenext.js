@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:server": "node --conditions=react-server --test tests/phase2.test.mjs",
+    "test:db": "node --conditions=react-server scripts/phase2-integration.mjs",
+    "db:index:plan": "node --conditions=react-server scripts/phase2-index.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
