@@ -1,15 +1,5 @@
 import "server-only";
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { createLocalDocumentClient } from "./local-dynamodb.mjs";
 
-const client = new DynamoDBClient({
-  region: process.env.AWS_REGION || "ap-northeast-1",
-  endpoint: process.env.DYNAMODB_ENDPOINT,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID || "local",
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "local",
-  },
-});
-
-export const db = DynamoDBDocumentClient.from(client);
+export const db = createLocalDocumentClient();
