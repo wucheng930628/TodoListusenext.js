@@ -13,9 +13,11 @@
 # testing
 /coverage
 /.phase2-test-runs/
+/.phase3-test-runs/
 
 # next.js
 /.next/
+/.next-phase3-api/
 /out/
 
 # production
