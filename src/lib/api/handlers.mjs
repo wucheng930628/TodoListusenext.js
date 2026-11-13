@@ -1,0 +1,205 @@
+import "server-only";
+import { DataError, assertId as assertModelId, fromFrontend, requireValue } from "../data-model.mjs";
+
+const definitions = {
+  workspaces: { type: "WORKSPACE", singular: "Workspace", fields: ["activeBoardId", "settings"] },
+  boards: { type: "BOARD", singular: "Board", fields: ["id", "name", "description", "wipLimit", "analyticsSize", "settings"] },
+  tasks: { type: "TASK", singular: "Task", fields: ["id", "title", "description", "status", "tag", "priority", "urgent", "date", "time", "subtasks", "notes"] },
+  widgets: { type: "WIDGET", singular: "Widget", fields: ["id", "type", "span", "height", "manualSize", "config"] },
+};
+const reserved = new Set(["__proto__", "constructor", "prototype", "entityType", "schemaVersion", "version", "createdAt", "updatedAt", "completedAt", "parentId", "workspaceId", "boardId", "gsi1pk", "gsi1sk", "taskCount", "widgetCount", "doingCount"]);
+const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Vary": "Origin" };
+const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501 };
+const messages = {
+  VALIDATION: "Invalid request parameters or data.", NOT_FOUND: "Resource not found.", OWNERSHIP: "Resource does not belong to the specified parent.",
+  CONFLICT: "Version conflict. Reload before retrying.", WIP_LIMIT: "WIP limit exceeded.", NOT_EMPTY: "Only empty boards may be deleted.",
+  FORBIDDEN: "This API is restricted to explicitly enabled local development.",
+  NOT_SUPPORTED: "Workspace enumeration is unsupported. Supply ?id= or use /api/workspaces/{id}.",
+};
+function response(data, status = 200) { return Response.json({ data }, { status, headers }); }
+function assertId(id, type) {
+  assertModelId(id, type);
+  requireValue(/#[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id), "Invalid database id");
+}
+function object(value) { requireValue(value && Object.getPrototypeOf(value) === Object.prototype, "Expected a plain object"); }
+function keys(value, allowed) { object(value); requireValue(Object.keys(value).every(key => allowed.includes(key)), "Unknown request field"); }
+function safeTree(value, depth = 0) {
+  requireValue(depth <= 12, "Data nesting exceeds limit");
+  if (Array.isArray(value)) { for (const item of value) safeTree(item, depth + 1); return; }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) { requireValue(!reserved.has(key), "Internal fields cannot be supplied"); safeTree(child, depth + 1); }
+  }
+}
+function version(value) { requireValue(Number.isSafeInteger(value) && value >= 1, "Invalid version"); return value; }
+function position(value = 0) { requireValue(Number.isSafeInteger(value) && value >= 0 && value <= 999999999999, "Invalid position"); return value; }
+function query(request, allowed) {
+  const params = new URL(request.url).searchParams;
+  for (const key of params.keys()) requireValue(allowed.includes(key) && params.getAll(key).length === 1, "Unknown or duplicate query parameter");
+  return Object.fromEntries(params);
+}
+function guard(request, env) {
+  const url = new URL(request.url);
+  const origin = env.SLOWLY_LOCAL_API_ORIGIN || "http://127.0.0.1:3000";
+  const configured = new URL(origin);
+  requireValue(env.NODE_ENV === "development" && env.SLOWLY_LOCAL_API === "1" &&
+    configured.protocol === "http:" && configured.hostname === "127.0.0.1" && configured.origin === origin &&
+    // Next dev may normalize Request.url to localhost; the original Host must
+    // still exactly match the configured 127.0.0.1 origin.
+    url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && url.port === configured.port &&
+    request.headers.get("host") === configured.host, "Local API disabled", "FORBIDDEN");
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  requireValue(!request.headers.has("forwarded") && (!forwardedHost || forwardedHost === configured.host) &&
+    (!forwardedProto || forwardedProto === "http") && (!forwardedFor || forwardedFor.split(",").every(ip => ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip.trim()))), "Proxy requests are not allowed", "FORBIDDEN");
+  const suppliedOrigin = request.headers.get("origin");
+  requireValue(!["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site")) &&
+    (!suppliedOrigin || suppliedOrigin === origin), "Cross-origin requests are not allowed", "FORBIDDEN");
+  if (!["GET", "HEAD"].includes(request.method)) requireValue(suppliedOrigin === origin, "An exact local Origin is required", "FORBIDDEN");
+}
+async function body(request) {
+  requireValue(request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "application/json", "JSON content type required");
+  const length = request.headers.get("content-length");
+  requireValue(length === null || (/^\d+$/.test(length) && Number(length) <= 200000), "Body too large");
+  requireValue(request.body, "JSON body required");
+  const reader = request.body.getReader(); const chunks = []; let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      size += value.byteLength;
+      if (size > 200000) { await reader.cancel(); throw new DataError("VALIDATION", "Body too large"); }
+      chunks.push(Buffer.from(value));
+    }
+    const result = JSON.parse(Buffer.concat(chunks).toString("utf8")); object(result); return result;
+  } catch (error) {
+    if (error instanceof DataError) throw error;
+    throw new DataError("VALIDATION", "Malformed JSON");
+  } finally { reader.releaseLock(); }
+}
+function validatePatch(resource, data, creating) {
+  const definition = definitions[resource]; keys(data, definition.fields); safeTree(data);
+  requireValue(creating || Object.keys(data).length > 0, "Empty patch");
+  if (data.id !== undefined) requireValue(typeof data.id === "string" && !data.id.startsWith("SLOWLY#"), "Expected a frontend id, not a database key");
+  if (data.subtasks !== undefined) {
+    requireValue(Array.isArray(data.subtasks), "Invalid subtasks");
+    for (const entry of data.subtasks) keys(entry, ["id", "title", "done"]);
+  }
+  if (data.analyticsSize !== undefined) {
+    keys(data.analyticsSize, ["width", "height"]);
+    requireValue(Object.values(data.analyticsSize).every(value => Number.isFinite(value) && value > 0 && value <= 10000), "Invalid analytics size");
+  }
+  if (data.settings !== undefined) object(data.settings);
+  if (data.config !== undefined) keys(data.config, ["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
+}
+function dto(item) {
+  return { id: item.id, version: item.version, position: item.position, createdAt: item.createdAt, updatedAt: item.updatedAt,
+    ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: item.data };
+}
+
+export function createApi(resource, { getRepository, configuration = () => process.env } = {}) {
+  const definition = definitions[resource]; requireValue(definition, "Unknown resource");
+  const { type, singular } = definition;
+  const wrap = action => async (request, context = {}) => {
+    try { guard(request, configuration()); return await action(request, context); }
+    catch (error) {
+      const code = error instanceof DataError && codes[error.code] ? error.code : "INTERNAL";
+      return Response.json({ error: { code, message: messages[code] || "An unexpected server error occurred." } }, { status: codes[code] || 500, headers });
+    }
+  };
+  const idFrom = async context => { const { id } = await context.params; assertId(id, type); return id; };
+  async function scopedBoard(repo, boardId, workspaceId) {
+    assertId(boardId, "BOARD"); if (workspaceId !== undefined) assertId(workspaceId, "WORKSPACE");
+    const board = await repo.getBoard(boardId);
+    requireValue(workspaceId === undefined || board.workspaceId === workspaceId, "Workspace mismatch", "OWNERSHIP");
+    return board;
+  }
+  async function assertScope(repo, item, scope, required) {
+    if (resource === "boards") {
+      if (required || scope.workspaceId !== undefined) assertId(scope.workspaceId, "WORKSPACE");
+      requireValue(scope.workspaceId === undefined || item.workspaceId === scope.workspaceId, "Workspace mismatch", "OWNERSHIP");
+    } else if (["tasks", "widgets"].includes(resource)) {
+      if (required || scope.boardId !== undefined) assertId(scope.boardId, "BOARD");
+      if (scope.workspaceId !== undefined) assertId(scope.workspaceId, "WORKSPACE");
+      requireValue((scope.boardId === undefined || item.boardId === scope.boardId) && (scope.workspaceId === undefined || item.workspaceId === scope.workspaceId), "Parent mismatch", "OWNERSHIP");
+    }
+  }
+  const scopeKeys = resource === "workspaces" ? [] : resource === "boards" ? ["workspaceId"] : ["boardId", "workspaceId"];
+  return {
+    collectionGet: wrap(async request => {
+      const q = query(request, resource === "workspaces" ? ["id"] : scopeKeys);
+      if (resource === "workspaces") {
+        if (q.id === undefined) throw new DataError("NOT_SUPPORTED", "Workspace list unsupported");
+        assertId(q.id, "WORKSPACE"); return response([dto(await (await getRepository()).getWorkspace(q.id))]);
+      }
+      let parent;
+      if (resource === "boards") { assertId(q.workspaceId, "WORKSPACE"); parent = q.workspaceId; }
+      else { assertId(q.boardId, "BOARD"); if (q.workspaceId !== undefined) assertId(q.workspaceId, "WORKSPACE"); parent = q.boardId; }
+      const repo = await getRepository();
+      if (resource !== "boards") await scopedBoard(repo, parent, q.workspaceId);
+      return response((await repo[`list${singular}s`](parent)).map(dto));
+    }),
+    collectionPost: wrap(async request => {
+      query(request, []); const input = await body(request);
+      keys(input, ["data", ...(resource === "workspaces" ? [] : ["position", ...scopeKeys])]);
+      validatePatch(resource, input.data, true);
+      const data = fromFrontend(type, input.data); const order = position(input.position);
+      if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
+      if (["tasks", "widgets"].includes(resource)) { assertId(input.boardId, "BOARD"); if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE"); }
+      const repo = await getRepository(); let item;
+      if (resource === "workspaces") item = await repo.createWorkspace(data);
+      else if (resource === "boards") item = await repo.createBoard(input.workspaceId, data, order);
+      else { await scopedBoard(repo, input.boardId, input.workspaceId); item = await repo[`create${singular}`](input.boardId, data, order); }
+      return response(dto(item), 201);
+    }),
+    itemGet: wrap(async (request, context) => {
+      const id = await idFrom(context); const q = query(request, scopeKeys);
+      // Validate scope syntax before any database operation.
+      if (q.boardId !== undefined) assertId(q.boardId, "BOARD");
+      if (q.workspaceId !== undefined) assertId(q.workspaceId, "WORKSPACE");
+      const repo = await getRepository(); const item = await repo[`get${singular}`](id);
+      await assertScope(repo, item, q, false); return response(dto(item));
+    }),
+    itemPatch: wrap(async (request, context) => {
+      const id = await idFrom(context); query(request, []); const input = await body(request);
+      keys(input, ["data", "version", ...scopeKeys]); version(input.version); validatePatch(resource, input.data, false);
+      if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
+      if (["tasks", "widgets"].includes(resource)) assertId(input.boardId, "BOARD");
+      if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
+      const repo = await getRepository(); const previous = await repo[`get${singular}`](id);
+      await assertScope(repo, previous, input, true);
+      const data = { ...previous.data, ...input.data };
+      if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
+      let item;
+      if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
+      else if (resource === "boards") item = await repo.updateBoard(id, data, input.version);
+      else item = await repo[`update${singular}`](input.boardId, id, data, input.version);
+      return response(dto(item));
+    }),
+    itemDelete: wrap(async (request, context) => {
+      requireValue(resource !== "workspaces", "Workspace deletion is unsupported", "NOT_SUPPORTED");
+      const id = await idFrom(context); query(request, []); const input = await body(request);
+      keys(input, ["version", ...scopeKeys]); version(input.version);
+      if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
+      else assertId(input.boardId, "BOARD");
+      if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
+      const repo = await getRepository(); const item = await repo[`get${singular}`](id);
+      await assertScope(repo, item, input, true);
+      if (resource === "boards") await repo.deleteBoard(id, input.version);
+      else await repo[`delete${singular}`](input.boardId, id, input.version);
+      return new Response(null, { status: 204, headers });
+    }),
+    orderPatch: wrap(async request => {
+      requireValue(resource !== "workspaces", "Unsupported ordering", "NOT_SUPPORTED");
+      query(request, []); const input = await body(request); keys(input, ["entries", ...scopeKeys]);
+      requireValue(Array.isArray(input.entries) && input.entries.length > 0 && input.entries.length <= 99, "Invalid ordering entries");
+      for (const entry of input.entries) { keys(entry, ["id", "version", "position"]); assertId(entry.id, type); version(entry.version); requireValue(entry.position !== undefined, "Position required"); position(entry.position); }
+      requireValue(new Set(input.entries.map(entry => entry.id)).size === input.entries.length, "Duplicate order entries");
+      const parent = resource === "boards" ? input.workspaceId : input.boardId;
+      assertId(parent, resource === "boards" ? "WORKSPACE" : "BOARD");
+      if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
+      const repo = await getRepository();
+      if (resource !== "boards") await scopedBoard(repo, parent, input.workspaceId);
+      return response((await repo[`reorder${singular}s`](parent, input.entries)).map(dto));
+    }),
+  };
+}
