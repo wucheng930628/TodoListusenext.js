@@ -22,6 +22,7 @@ function assertId(id, type) {
   assertModelId(id, type);
   requireValue(/#[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id), "Invalid database id");
 }
+export { assertId as assertApiId };
 function object(value) { requireValue(value && Object.getPrototypeOf(value) === Object.prototype, "Expected a plain object"); }
 export function keys(value, allowed) { object(value); requireValue(Object.keys(value).every(key => allowed.includes(key)), "Unknown request field"); }
 function safeTree(value, depth = 0) {
@@ -170,6 +171,9 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const repo = await getRepository(); const previous = await repo[`get${singular}`](id);
       await assertScope(repo, previous, input, true);
       const data = { ...previous.data, ...input.data };
+      if (resource === "tasks" && input.data.subtasks !== undefined) {
+        data.subtasks = input.data.subtasks.map(item => ({ ...previous.data.subtasks.find(old => old.id === item.id), ...item }));
+      }
       if (resource === "widgets" && input.data.config !== undefined) {
         // Preserve imported extension fields while keeping existing known-config replacement semantics.
         const known = new Set(["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);

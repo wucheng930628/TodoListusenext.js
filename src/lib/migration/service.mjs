@@ -52,6 +52,7 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     if (operation.parentId) Object.assign(item, { parentId: operation.parentId, workspaceId: operation.workspaceId, gsi1pk: operation.parentId, gsi1sk: `${operation.type}#${String(operation.position).padStart(12, "0")}#${item.id}` });
     if (operation.boardId) item.boardId = operation.boardId;
     if (operation.type === "BOARD") Object.assign(item, { taskCount: 0, widgetCount: 0, doingCount: 0 });
+    if (operation.type === "WORKSPACE") item.boardCount = 0;
     assertItemSize(item); return item;
   }
   async function ownedTarget(receipt, locked = true) {
@@ -116,6 +117,10 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
       ((receipt.operation.type === "BOARD" && parent.entityType === "WORKSPACE") || (["TASK", "WIDGET"].includes(receipt.operation.type) && parent.entityType === "BOARD")), "Parent is not confirmed", "DEPENDENCY_CONFLICT");
     await ownedTarget(parentReceipt);
     const changes = {};
+    if (receipt.operation.type === "BOARD") {
+      requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount + delta >= 0, "Workspace count metadata requires review", "INTEGRITY_CONFLICT");
+      changes.boardCount = parent.boardCount + delta;
+    }
     if (["TASK", "WIDGET"].includes(receipt.operation.type)) {
       const key = receipt.operation.type === "TASK" ? "taskCount" : "widgetCount";
       changes[key] = parent[key] + delta;

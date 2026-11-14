@@ -60,7 +60,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return items.filter(item => item.entityType === type && item.parentId === parent).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
   }
   async function createWorkspace(data) {
-    const item = makeItem("WORKSPACE", data, { now: clock() });
+    const item = { ...makeItem("WORKSPACE", data, { now: clock() }), viewOrigin: "api", boardCount: 0 };
     await commit([put(item)]); return item;
   }
   async function saveWorkspace(id, data, version) {
@@ -70,8 +70,9 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   }
   async function createBoard(workspaceId, data, position = 0) {
     const parent = await get("WORKSPACE", workspaceId);
-    const item = makeItem("BOARD", data, { parent: workspaceId, position, now: clock() });
-    await commit([put(item), put(revised(parent, {}), parent)]); return item;
+    requireValue(Number.isSafeInteger(parent.boardCount), "Workspace count metadata requires review");
+    const item = { ...makeItem("BOARD", data, { parent: workspaceId, position, now: clock() }), widgetPresence: "absent" };
+    await commit([put(item), put(revised(parent, { boardCount: parent.boardCount + 1 }), parent)]); return item;
   }
   async function updateBoard(id, data, version) {
     const previous = await get("BOARD", id); expected(previous, version);
@@ -85,7 +86,8 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(board.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
     requireValue(board.taskCount === 0 && board.widgetCount === 0, "Only empty boards may be deleted", "NOT_EMPTY");
     const parent = await get("WORKSPACE", board.workspaceId);
-    await commit([remove(board), put(revised(parent, {}), parent)]);
+    requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount > 0, "Workspace count metadata requires review");
+    await commit([remove(board), put(revised(parent, { boardCount: parent.boardCount - 1 }), parent)]);
   }
   async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false) {
     const board = await get("BOARD", boardId);
@@ -106,7 +108,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const countKey = type === "TASK" ? "taskCount" : "widgetCount";
     const doingCount = board.doingCount + (type === "TASK" ? Number(item?.data.status === "doing") - Number(previous?.data.status === "doing") : 0);
     requireValue(doingCount <= board.data.wipLimit && doingCount >= 0, "WIP limit exceeded", "WIP_LIMIT");
-    const nextBoard = revised(board, { [countKey]: board[countKey] + (previous ? deleting ? -1 : 0 : 1), doingCount });
+    const nextBoard = revised(board, { [countKey]: board[countKey] + (previous ? deleting ? -1 : 0 : 1), doingCount, ...(type === "WIDGET" ? { widgetPresence: "present" } : {}) });
     await commit([deleting ? remove(previous) : put(item, previous), put(nextBoard, board)]);
     return item ?? null;
   }

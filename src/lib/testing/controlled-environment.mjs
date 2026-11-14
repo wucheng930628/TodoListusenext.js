@@ -7,9 +7,10 @@ import { requireValue } from "../data-model.mjs";
 export function controlledBinding(env = process.env) {
   const runId = env.SLOWLY_CONTROLLED_UI_RUN_ID;
   const tableName = env.SLOWLY_CONTROLLED_UI_TABLE;
+  const phase = env.SLOWLY_MAIN_UI_TEST === "1" ? "Phase4C2" : "Phase4B2";
   if (!runId && !tableName) return null;
   requireValue(env.NODE_ENV === "development" && env.SLOWLY_LOCAL_API === "1" &&
-    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(runId || "") && tableName === `Slowly_Phase4B2_${runId.replaceAll("-", "")}` &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(runId || "") && tableName === `Slowly_${phase}_${runId.replaceAll("-", "")}` &&
     (env.DYNAMODB_ENDPOINT || "http://127.0.0.1:9000") === "http://127.0.0.1:9000", "Invalid controlled test binding", "FORBIDDEN");
   return { runId, tableName };
 }
@@ -29,9 +30,10 @@ export async function controlledEnvironment() {
     const fn = target[name];
     if (typeof fn !== "function") return fn;
     return async (...args) => {
-      requireValue(!["createWorkspace", "saveWorkspace", "createBoard", "updateBoard", "deleteBoard", "reorderBoards"].includes(name), "Fixture structure is read-only", "FORBIDDEN");
-      if (name === "getWorkspace" || name === "listBoards") own(await target.getWorkspace(args[0]));
-      else if (["getBoard", "listTasks", "listWidgets", "createTask", "updateTask", "deleteTask", "setTaskStatus", "createWidget", "updateWidget", "deleteWidget", "reorderTasks", "reorderWidgets"].includes(name)) own(await target.getBoard(args[0]));
+      const mainUi = process.env.SLOWLY_MAIN_UI_TEST === "1";
+      requireValue(!["createWorkspace", "saveWorkspace", ...(!mainUi ? ["createBoard", "updateBoard", "deleteBoard", "reorderBoards"] : [])].includes(name), "Fixture structure is read-only", "FORBIDDEN");
+      if (["getWorkspace", "listBoards", "createBoard", "reorderBoards"].includes(name)) own(await target.getWorkspace(args[0]));
+      else if (["getBoard", "updateBoard", "deleteBoard", "listTasks", "listWidgets", "createTask", "updateTask", "deleteTask", "setTaskStatus", "createWidget", "updateWidget", "deleteWidget", "reorderTasks", "reorderWidgets"].includes(name)) own(await target.getBoard(args[0]));
       else if (name === "getTask") own(await target.getTask(args[0]));
       else if (name === "getWidget") own(await target.getWidget(args[0]));
       else requireValue(false, "Unsupported controlled operation", "FORBIDDEN");
