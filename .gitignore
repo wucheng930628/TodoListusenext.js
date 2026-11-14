@@ -15,10 +15,12 @@
 /.phase2-test-runs/
 /.phase3-test-runs/
 /.phase4b1-test-runs/
+/.phase4b2-test-runs/
 
 # next.js
 /.next/
 /.next-phase3-api/
+/.next-controlled-ui/
 /out/
 
 # production
