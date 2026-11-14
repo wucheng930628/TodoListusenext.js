@@ -7,7 +7,7 @@ import { BackupError } from "../client/workspace-backup.mjs";
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", Vary: "Origin" };
 const statuses = { VALIDATION: 400, FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, PLAN_CONFLICT: 409, SOURCE_CONFLICT: 409,
   INTEGRITY_CONFLICT: 409, IDEMPOTENCY_KEY_REUSE: 409, SESSION_STATE: 409, DEPENDENCY_CONFLICT: 409, TARGET_CONFLICT: 409,
-  WIP_LIMIT: 409, ROLLBACK_CONFLICT: 409, PREVIEW_INVALID: 422, UNSUPPORTED_SCHEMA: 422, PAYLOAD_TOO_LARGE: 413 };
+  WIP_LIMIT: 409, ROLLBACK_CONFLICT: 409, RELEASE_BLOCKED: 409, VERIFICATION_STALE: 409, PREVIEW_INVALID: 422, UNSUPPORTED_SCHEMA: 422, PAYLOAD_TOO_LARGE: 413 };
 const hashId = value => requireValue(typeof value === "string" && /^[a-f0-9]{64}$/.test(value), "Invalid migration identifier");
 const json = (data, status = 200) => Response.json({ data }, { status, headers });
 function sessionDto(session) {
@@ -86,6 +86,17 @@ export function createMigrationApi({ getService, configuration = () => process.e
       const { migrationId } = await ids(context); const input = await read(request, ["expectedSessionVersion", "confirmation"]);
       requireValue(Number.isSafeInteger(input.expectedSessionVersion) && input.expectedSessionVersion >= 1 && input.confirmation === migrationId, "Explicit rollback version and confirmation required");
       return json(sessionDto(await (await getService()).rollback(migrationId, input.expectedSessionVersion, input.confirmation)));
+    }),
+    releasePreview: wrap(async (request, context) => {
+      const { migrationId } = await ids(context); const input = await read(request, ["expectedSessionVersion"]);
+      requireValue(Number.isSafeInteger(input.expectedSessionVersion) && input.expectedSessionVersion >= 1, "Explicit session version required");
+      return json(await (await getService()).releasePreview(migrationId, input.expectedSessionVersion));
+    }),
+    release: wrap(async (request, context) => {
+      const { migrationId } = await ids(context); const input = await read(request, ["expectedSessionVersion", "expectedVerificationHash", "confirmation"]);
+      requireValue(Number.isSafeInteger(input.expectedSessionVersion) && input.expectedSessionVersion >= 1 && input.confirmation === migrationId, "Explicit release version and confirmation required"); hashId(input.expectedVerificationHash);
+      const service = await getService(); const session = await service.release(migrationId, input.expectedSessionVersion, input.expectedVerificationHash, input.confirmation);
+      return json({ session: sessionDto(session), verificationHash: session.releaseVerificationHash, nextAction: session.lockState === "RELEASED" ? null : "resume-release" }, session.lockState === "RELEASED" ? 200 : 202);
     }),
   };
 }
