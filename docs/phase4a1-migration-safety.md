@@ -173,6 +173,8 @@ npm.cmd run lint
 
 尚未對真實 DynamoDB Local 執行這套新服務的整合測試，因此不把 mock 通過說成已驗證 Local 執行。進入真實資料 Phase 4B 前，應先以獨立 namespace、隔離資料與完整紀錄驗證 Local 的交易／條件式，再取得真實來源遷移授權。
 
+後續 Phase 4B-1 已使用獨立測試表完成真實 Local 驗證；結果與限制見 [Phase 4B-1](phase4b1-integration-preparation.md)。上述段落保留為 Phase 4A.1 當時的驗收狀態。
+
 其他限制：
 
 - Item Lock 防護涵蓋本專案 Repository 路徑；有直接 DynamoDB 寫入權限的程式可繞過應用程式，不能當成資料庫層登入授權。不得同時用手動工具改寫受保護資料。
