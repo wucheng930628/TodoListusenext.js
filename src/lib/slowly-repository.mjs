@@ -13,14 +13,25 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   function expected(item, version) { requireValue(Number.isSafeInteger(version) && version === item.version, "Version conflict; reload before retrying", "CONFLICT"); }
   function put(item, previous) {
     assertItemSize(item);
-    return { Put: { TableName: tableName, Item: item, ConditionExpression: previous ? "#v = :v AND #t = :t" : "attribute_not_exists(id)", ...(previous ? { ExpressionAttributeNames: { "#v": "version", "#t": "entityType" }, ExpressionAttributeValues: { ":v": previous.version, ":t": previous.entityType } } : {}) } };
+    if (previous) requireValue(previous.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
+    return { Put: { TableName: tableName, Item: item, ConditionExpression: previous ? "#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)" : "attribute_not_exists(id)", ...(previous ? { ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock" }, ExpressionAttributeValues: { ":v": previous.version, ":t": previous.entityType, ":unlocked": false } } : {}) } };
   }
-  function remove(item) { return { Delete: { TableName: tableName, Key: { id: item.id }, ConditionExpression: "#v = :v AND #t = :t", ExpressionAttributeNames: { "#v": "version", "#t": "entityType" }, ExpressionAttributeValues: { ":v": item.version, ":t": item.entityType } } }; }
+  function remove(item) {
+    requireValue(item.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
+    return { Delete: { TableName: tableName, Key: { id: item.id }, ConditionExpression: "#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)", ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock" }, ExpressionAttributeValues: { ":v": item.version, ":t": item.entityType, ":unlocked": false } } };
+  }
   async function commit(actions) {
     requireValue(actions.length <= 100 && Buffer.byteLength(JSON.stringify(actions)) < 3500000, "Transaction too large");
     try { await db.send(new TransactWriteCommand({ TransactItems: actions })); }
     catch (error) {
-      if (["ConditionalCheckFailedException", "TransactionConflictException"].includes(error.name) || (error.name === "TransactionCanceledException" && error.CancellationReasons?.some(reason => ["ConditionalCheckFailed", "TransactionConflict"].includes(reason.Code)))) throw new DataError("CONFLICT", "Concurrent change; reload before retrying", { cause: error });
+      if (["ConditionalCheckFailedException", "TransactionConflictException"].includes(error.name) || (error.name === "TransactionCanceledException" && error.CancellationReasons?.some(reason => ["ConditionalCheckFailed", "TransactionConflict"].includes(reason.Code)))) {
+        for (const action of actions) {
+          const id = action.Put?.Item.id || action.Delete?.Key.id;
+          const current = await db.send(new GetCommand({ TableName: tableName, Key: { id }, ConsistentRead: true }));
+          if (current.Item?.migrationLock === true) throw new DataError("MIGRATION_LOCKED", "Migration lock is held", { cause: error });
+        }
+        throw new DataError("CONFLICT", "Concurrent change; reload before retrying", { cause: error });
+      }
       throw new DataError("STORAGE", "DynamoDB operation failed", { cause: error });
     }
   }
@@ -57,6 +68,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   }
   async function deleteBoard(id, version) {
     const board = await get("BOARD", id); expected(board, version);
+    requireValue(board.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
     requireValue(board.taskCount === 0 && board.widgetCount === 0, "Only empty boards may be deleted", "NOT_EMPTY");
     const parent = await get("WORKSPACE", board.workspaceId);
     await commit([remove(board), put(revised(parent, {}), parent)]);

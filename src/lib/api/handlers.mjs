@@ -9,12 +9,13 @@ const definitions = {
 };
 const reserved = new Set(["__proto__", "constructor", "prototype", "entityType", "schemaVersion", "version", "createdAt", "updatedAt", "completedAt", "parentId", "workspaceId", "boardId", "gsi1pk", "gsi1sk", "taskCount", "widgetCount", "doingCount"]);
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Vary": "Origin" };
-const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501 };
+const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501, MIGRATION_LOCKED: 409 };
 const messages = {
   VALIDATION: "Invalid request parameters or data.", NOT_FOUND: "Resource not found.", OWNERSHIP: "Resource does not belong to the specified parent.",
   CONFLICT: "Version conflict. Reload before retrying.", WIP_LIMIT: "WIP limit exceeded.", NOT_EMPTY: "Only empty boards may be deleted.",
   FORBIDDEN: "This API is restricted to explicitly enabled local development.",
   NOT_SUPPORTED: "Workspace enumeration is unsupported. Supply ?id= or use /api/workspaces/{id}.",
+  MIGRATION_LOCKED: "This resource is protected by an active migration lock.",
 };
 function response(data, status = 200) { return Response.json({ data }, { status, headers }); }
 function assertId(id, type) {
@@ -22,7 +23,7 @@ function assertId(id, type) {
   requireValue(/#[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id), "Invalid database id");
 }
 function object(value) { requireValue(value && Object.getPrototypeOf(value) === Object.prototype, "Expected a plain object"); }
-function keys(value, allowed) { object(value); requireValue(Object.keys(value).every(key => allowed.includes(key)), "Unknown request field"); }
+export function keys(value, allowed) { object(value); requireValue(Object.keys(value).every(key => allowed.includes(key)), "Unknown request field"); }
 function safeTree(value, depth = 0) {
   requireValue(depth <= 12, "Data nesting exceeds limit");
   if (Array.isArray(value)) { for (const item of value) safeTree(item, depth + 1); return; }
@@ -32,12 +33,12 @@ function safeTree(value, depth = 0) {
 }
 function version(value) { requireValue(Number.isSafeInteger(value) && value >= 1, "Invalid version"); return value; }
 function position(value = 0) { requireValue(Number.isSafeInteger(value) && value >= 0 && value <= 999999999999, "Invalid position"); return value; }
-function query(request, allowed) {
+export function query(request, allowed) {
   const params = new URL(request.url).searchParams;
   for (const key of params.keys()) requireValue(allowed.includes(key) && params.getAll(key).length === 1, "Unknown or duplicate query parameter");
   return Object.fromEntries(params);
 }
-function guard(request, env) {
+export function guard(request, env) {
   const url = new URL(request.url);
   const origin = env.SLOWLY_LOCAL_API_ORIGIN || "http://127.0.0.1:3000";
   const configured = new URL(origin);
@@ -57,17 +58,18 @@ function guard(request, env) {
     (!suppliedOrigin || suppliedOrigin === origin), "Cross-origin requests are not allowed", "FORBIDDEN");
   if (!["GET", "HEAD"].includes(request.method)) requireValue(suppliedOrigin === origin, "An exact local Origin is required", "FORBIDDEN");
 }
-async function body(request) {
+export async function body(request, maxBytes = 200000, sizeErrorCode = "VALIDATION") {
   requireValue(request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "application/json", "JSON content type required");
   const length = request.headers.get("content-length");
-  requireValue(length === null || (/^\d+$/.test(length) && Number(length) <= 200000), "Body too large");
+  requireValue(length === null || /^\d+$/.test(length), "Invalid content length");
+  requireValue(length === null || Number(length) <= maxBytes, "Body too large", sizeErrorCode);
   requireValue(request.body, "JSON body required");
   const reader = request.body.getReader(); const chunks = []; let size = 0;
   try {
     while (true) {
       const { done, value } = await reader.read(); if (done) break;
       size += value.byteLength;
-      if (size > 200000) { await reader.cancel(); throw new DataError("VALIDATION", "Body too large"); }
+      if (size > maxBytes) { await reader.cancel(); throw new DataError(sizeErrorCode, "Body too large"); }
       chunks.push(Buffer.from(value));
     }
     const result = JSON.parse(Buffer.concat(chunks).toString("utf8")); object(result); return result;
