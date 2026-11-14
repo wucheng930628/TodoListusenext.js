@@ -1,6 +1,7 @@
 "use client";
 
 import TaskAnalytics from "./task-analytics";
+import { AsyncWidgetNote } from "../components/async-widget-note.mjs";
 
 export const widgetCatalog = [
   { type: "analytics", name: "任務完成統計", icon: "▥", description: "完成趨勢、完成率與連續完成天數" },
@@ -63,39 +64,39 @@ export function remainingSeconds(config, now) {
   return config.remaining ?? (config.minutes || 25) * 60;
 }
 
-function TimerWidget({ widget, tasks, now, onConfigure }) {
+function TimerWidget({ widget, tasks, now, onConfigure, readOnly = false }) {
   const config = widget.config;
   const remaining = remainingSeconds(config, now);
   const running = Boolean(config.endsAt) && remaining > 0;
   const completed = Boolean(config.endsAt) && remaining === 0;
   const availableTasks = tasks.filter(task => task.status !== "done" || task.id === config.taskId);
   return <div className="timer-widget">
-    <select aria-label="專注任務" value={availableTasks.some(task => task.id === config.taskId) ? config.taskId : ""} onChange={event => onConfigure({ taskId: event.target.value })}>
+    <select disabled={readOnly} aria-label="專注任務" value={availableTasks.some(task => task.id === config.taskId) ? config.taskId : ""} onChange={event => onConfigure({ taskId: event.target.value })}>
       <option value="">選擇專注任務（選填）</option>
       {availableTasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}
     </select>
     <div className="timer-digits" role="timer" aria-label="專注剩餘時間">{String(Math.floor(remaining / 60)).padStart(2, "0")}<span>:</span>{String(remaining % 60).padStart(2, "0")}</div>
     <p className="timer-status" role="status">{completed ? "專注完成" : running ? "專注中" : "尚未開始"}</p>
-    <div className="timer-actions"><button className="primary" disabled={now === null} onClick={() => onConfigure(running
+    <div className="timer-actions"><button className="primary" disabled={readOnly || now === null} onClick={() => onConfigure(running
       ? { endsAt: null, remaining }
       : { endsAt: now + (remaining || (config.minutes || 25) * 60) * 1000, remaining: null })}>{running ? "暫停" : "開始專注"}</button>
-      <button className="secondary" onClick={() => onConfigure({ endsAt: null, remaining: null })}>重設</button></div>
+      <button className="secondary" disabled={readOnly} onClick={() => onConfigure({ endsAt: null, remaining: null })}>重設</button></div>
   </div>;
 }
 
-export function WidgetSettings({ widget, onConfigure }) {
-  if (widget.type === "timer") return <label className="widget-setting">每次專注分鐘數<select value={widget.config.minutes || 25} onChange={event => onConfigure({ minutes: Number(event.target.value), endsAt: null, remaining: null })}>{[15, 25, 45, 60].map(minutes => <option key={minutes} value={minutes}>{minutes} 分鐘</option>)}</select></label>;
-  if (widget.type === "today" || widget.type === "upcoming") return <label className="widget-setting check-setting"><input type="checkbox" checked={Boolean(widget.config.showCompleted)} onChange={event => onConfigure({ showCompleted: event.target.checked })} />包含已完成任務</label>;
+export function WidgetSettings({ widget, onConfigure, readOnly = false }) {
+  if (widget.type === "timer") return <label className="widget-setting">每次專注分鐘數<select disabled={readOnly} value={widget.config.minutes || 25} onChange={event => onConfigure({ minutes: Number(event.target.value), endsAt: null, remaining: null })}>{[15, 25, 45, 60].map(minutes => <option key={minutes} value={minutes}>{minutes} 分鐘</option>)}</select></label>;
+  if (widget.type === "today" || widget.type === "upcoming") return <label className="widget-setting check-setting"><input disabled={readOnly} type="checkbox" checked={Boolean(widget.config.showCompleted)} onChange={event => onConfigure({ showCompleted: event.target.checked })} />包含已完成任務</label>;
   return null;
 }
 
-export function WidgetContent({ widget, tasks, now, onEdit, onConfigure }) {
+export function WidgetContent({ widget, tasks, now, onEdit, onConfigure, asyncMode = false, version, readOnly = false, noteDraftStore }) {
   switch (widget.type) {
     case "analytics": return <TaskAnalytics tasks={tasks} now={now} embedded />;
     case "today":
     case "upcoming": return <TaskListWidget widget={widget} tasks={tasks} now={now} onEdit={onEdit} />;
-    case "timer": return <TimerWidget widget={widget} tasks={tasks} now={now} onConfigure={onConfigure} />;
-    case "note": return <textarea className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="輸入筆記…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
+    case "timer": return <TimerWidget widget={widget} tasks={tasks} now={now} onConfigure={onConfigure} readOnly={readOnly} />;
+    case "note": return asyncMode ? <AsyncWidgetNote widget={widget} version={version} readOnly={readOnly} onConfigure={onConfigure} draftStore={noteDraftStore} /> : <textarea className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="輸入筆記…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
     default: return null;
   }
 }

@@ -1,12 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useAsyncDraft } from "../hooks/use-async-draft.mjs";
 import "./task-panel.css";
 
-export default function TaskPanel({ task, columns, onChange, onSave, onClose, onDelete }) {
+export default function TaskPanel({ task, columns, onChange, onSave, onClose, onDelete, asyncMode = false, readOnly = false, onReloadLatest }) {
   const panel = useRef(null);
   const [subtaskTitle, setSubtaskTitle] = useState("");
   const [error, setError] = useState("");
+  const flow = useAsyncDraft();
+  const [submitGate] = useState(() => {
+    let pending = false;
+    return { start() { if (pending) return false; pending = true; return true; }, finish() { pending = false; } };
+  });
+  const saving = asyncMode && flow.status === "saving";
+  async function runAsync(action) {
+    if (saving || readOnly || !submitGate.start()) { setError("目前唯讀或仍在儲存中。"); return; }
+    setError(""); flow.open(task.id || "new", task);
+    try { await flow.save(async () => { const message = await action(); if (typeof message === "string" && message) throw new Error(message); }); }
+    catch (error) { setError(error.status === 409 ? "版本或 WIP 衝突；草稿已保留，請重新讀取後比對。" : error.outcome === "not-confirmed" ? "寫入結果不明，草稿已保留；請勿直接重送。" : error.message); }
+    finally { submitGate.finish(); }
+  }
   const subtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
   const completedCount = subtasks.filter(item => item.done).length;
 
@@ -34,11 +48,11 @@ export default function TaskPanel({ task, columns, onChange, onSave, onClose, on
 
   return <dialog ref={panel} className="task-panel" aria-labelledby="task-panel-heading" onCancel={event => {
     event.preventDefault();
-    onClose();
-  }} onClick={event => { if (event.target === panel.current) onClose(); }}>
-    <form onSubmit={event => setError(onSave(event) || "")}>
-      <header className="task-panel-header"><h2 id="task-panel-heading">{task.id ? "任務詳情" : "新增任務"}</h2><button type="button" className="close-button" aria-label="關閉任務面板" onClick={onClose}>×</button></header>
-      <div className="task-panel-content">
+    if (!saving) onClose();
+  }} onClick={event => { if (!saving && event.target === panel.current) onClose(); }}>
+    <form aria-busy={saving} onSubmit={event => { event.preventDefault(); if (asyncMode) return runAsync(() => onSave(event)); setError(onSave(event) || ""); }}>
+      <header className="task-panel-header"><h2 id="task-panel-heading">{task.id ? "任務詳情" : "新增任務"}</h2><button type="button" className="close-button" aria-label="關閉任務面板" disabled={saving} onClick={onClose}>×</button></header>
+      <fieldset className="task-panel-content" disabled={asyncMode && (readOnly || saving)} style={{ border: 0, margin: 0, minWidth: 0 }}>
         <label className="task-panel-title">任務名稱<input autoFocus required maxLength={100} placeholder="輸入任務名稱" value={task.title} onChange={event => update("title", event.target.value)} /></label>
         <div className="form-row"><label>狀態<select value={task.status} onChange={event => update("status", event.target.value)}>{columns.map(column => <option key={column.id} value={column.id}>{column.name}</option>)}</select></label><label>優先級<select value={task.priority} onChange={event => update("priority", event.target.value)}>{["低", "一般", "高"].map(priority => <option key={priority}>{priority}</option>)}</select></label></div>
         <div className="form-row"><label>截止日期<input type="date" value={task.date} onChange={event => onChange({ ...task, date: event.target.value, time: event.target.value ? task.time || "" : "" })} /></label><label>截止時間（選填）<input type="time" step={60} disabled={!task.date} value={task.time || ""} onChange={event => update("time", event.target.value)} /></label></div>
@@ -61,9 +75,10 @@ export default function TaskPanel({ task, columns, onChange, onSave, onClose, on
           }} /><button type="button" className="secondary" disabled={!subtaskTitle.trim()} onClick={addSubtask}>＋ 加入</button></div>
         </section>
         <label>備註<textarea rows={4} maxLength={5000} placeholder="輸入備註（選填）" value={task.notes || ""} onChange={event => update("notes", event.target.value)} /></label>
-      </div>
+      </fieldset>
       {error && <p className="task-panel-error" role="alert">{error}</p>}
-      <footer className="task-panel-actions">{task.id && <button type="button" className="delete-button" onClick={onDelete}>刪除任務</button>}<button type="button" className="secondary" onClick={onClose}>取消</button><button type="submit" className="primary">儲存任務</button></footer>
+      {onReloadLatest && <button type="button" disabled={saving} className="secondary" onClick={() => { void onReloadLatest().catch(error => setError(error.message)); }}>重新讀取並採用最新任務</button>}
+      <footer className="task-panel-actions">{task.id && <button type="button" className="delete-button" disabled={saving || readOnly} onClick={() => { if (asyncMode) void runAsync(onDelete); else onDelete(); }}>刪除任務</button>}<button type="button" className="secondary" disabled={saving} onClick={onClose}>取消</button><button type="submit" className="primary" disabled={saving || readOnly}>{saving ? "儲存中…" : "儲存任務"}</button></footer>
     </form>
   </dialog>;
 }
