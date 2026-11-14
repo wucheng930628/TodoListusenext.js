@@ -19,8 +19,9 @@ export function migrationStore(db, tableName = "SlowlyTasks") {
     return { Put: { TableName: tableName, Item: item, ...condition(previous, target) } };
   };
   const remove = item => ({ Delete: { TableName: tableName, Key: { id: item.id }, ...condition(item, true) } });
+  const check = item => ({ ConditionCheck: { TableName: tableName, Key: { id: item.id }, ...condition(item, true) } });
   async function transact(actions) {
-    requireValue(actions.length > 0 && actions.length <= 100 && new Set(actions.map(action => action.Put?.Item.id || action.Delete?.Key.id)).size === actions.length, "Invalid transaction actions");
+    requireValue(actions.length > 0 && actions.length <= 100 && new Set(actions.map(action => action.Put?.Item.id || action.Delete?.Key.id || action.ConditionCheck?.Key.id)).size === actions.length, "Invalid transaction actions");
     requireValue(Buffer.byteLength(JSON.stringify(actions)) < 3500000, "Transaction size exceeded");
     try { await db.send(new TransactWriteCommand({ TransactItems: actions })); }
     catch (error) {
@@ -29,5 +30,5 @@ export function migrationStore(db, tableName = "SlowlyTasks") {
       throw new DataError("STORAGE", "Migration storage failed", { cause: error });
     }
   }
-  return { get, put, remove, transact };
+  return { get, put, remove, check, transact };
 }

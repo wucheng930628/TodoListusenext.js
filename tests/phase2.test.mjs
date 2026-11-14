@@ -6,34 +6,7 @@ import { fromFrontend, toFrontend, makeItem, validateData, splitFrontendWorkspac
 import { createRepository } from "../src/lib/slowly-repository.mjs";
 import { localClientOptions } from "../src/lib/local-dynamodb.mjs";
 
-class MemoryClient {
-  items = new Map();
-  calls = [];
-  async send(command) {
-    const input = structuredClone(command.input);
-    this.calls.push({ type: command.constructor.name, input });
-    if (command.constructor.name === "GetCommand") return { Item: structuredClone(this.items.get(input.Key.id)) };
-    if (command.constructor.name === "QueryCommand") {
-      const all = [...this.items.values()].filter(item => item.gsi1pk === input.ExpressionAttributeValues[":parent"] && item.gsi1sk.startsWith(input.ExpressionAttributeValues[":type"])).sort((a, b) => a.gsi1sk.localeCompare(b.gsi1sk));
-      const start = input.ExclusiveStartKey ? all.findIndex(item => item.id === input.ExclusiveStartKey.id) + 1 : 0;
-      const page = all.slice(start, start + 1);
-      return { Items: structuredClone(page), ...(start + 1 < all.length ? { LastEvaluatedKey: { id: page[0].id } } : {}) };
-    }
-    assert.equal(command.constructor.name, "TransactWriteCommand");
-    const actions = input.TransactItems.map(action => ({ kind: action.Put ? "put" : "delete", value: action.Put || action.Delete }));
-    assert.equal(new Set(actions.map(({ value }) => value.Item?.id || value.Key.id)).size, actions.length);
-    for (const { value } of actions) {
-      const existing = this.items.get(value.Item?.id || value.Key.id);
-      const valid = value.ConditionExpression === "attribute_not_exists(id)" ? !existing : existing && existing.version === value.ExpressionAttributeValues[":v"] && existing.entityType === value.ExpressionAttributeValues[":t"];
-      if (!valid) throw Object.assign(new Error("Condition failed"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }] });
-    }
-    for (const { kind, value } of actions) {
-      if (kind === "put") this.items.set(value.Item.id, structuredClone(value.Item));
-      else this.items.delete(value.Key.id);
-    }
-    return {};
-  }
-}
+import { MemoryClient } from "./helpers/memory-client.mjs";
 
 test("isolated CRUD scenario, query pagination and existing-data preservation", async () => {
   const db = new MemoryClient();

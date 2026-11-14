@@ -23,7 +23,7 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     validHash(id); const session = await getControl(sessionKey(id), "MIGRATION_SESSION");
     requireValue(session.planFormatVersion === 2 && session.targetSchemaVersion === 1, "Unsupported session schema", "UNSUPPORTED_SCHEMA");
     requireValue([session.total, session.registeredCount, session.confirmedCount, session.rolledBackCount, session.releasedCount].every(value => Number.isSafeInteger(value) && value >= 0) && session.total >= 1 && session.registeredCount <= session.total && session.confirmedCount <= session.registeredCount && session.rolledBackCount <= session.confirmedCount && session.releasedCount <= session.confirmedCount, "Invalid session counters", "INTEGRITY_CONFLICT");
-    requireValue(session.migrationId === id && ["PREPARING", "READY", "RUNNING", "VERIFYING", "VERIFIED", "CONFLICT", "FAILED", "ROLLING_BACK", "ROLLBACK_CONFLICT", "ROLLED_BACK", "RELEASED"].includes(session.state) && ["HELD", "CLOSED", "RELEASING", "RELEASED"].includes(session.lockState), "Invalid session state", "INTEGRITY_CONFLICT");
+    requireValue(session.migrationId === id && ["PREPARING", "READY", "RUNNING", "VERIFYING", "VERIFIED", "RELEASING", "CONFLICT", "FAILED", "ROLLING_BACK", "ROLLBACK_CONFLICT", "ROLLED_BACK", "RELEASED"].includes(session.state) && ["HELD", "CLOSED", "RELEASING", "RELEASED"].includes(session.lockState), "Invalid session state", "INTEGRITY_CONFLICT");
     return session;
   }
   async function getOperation(id, op) {
@@ -54,9 +54,9 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     if (operation.type === "BOARD") Object.assign(item, { taskCount: 0, widgetCount: 0, doingCount: 0 });
     assertItemSize(item); return item;
   }
-  async function ownedTarget(receipt) {
+  async function ownedTarget(receipt, locked = true) {
     const item = await store.get(receipt.operation.targetId);
-    requireValue(item && item.schemaVersion === 1 && item.migrationLock === true && item.migrationOwner?.migrationId === receipt.migrationId && item.migrationOwner?.operationId === receipt.operation.operationId && item.version === receipt.managedVersion && hash(item) === receipt.managedHash, "Target ownership, content or version changed", "INTEGRITY_CONFLICT");
+    requireValue(item && item.schemaVersion === 1 && item.migrationLock === locked && item.migrationOwner?.migrationId === receipt.migrationId && item.migrationOwner?.operationId === receipt.operation.operationId && item.version === receipt.managedVersion && hash(item) === receipt.managedHash, "Target ownership, content or version changed", "INTEGRITY_CONFLICT");
     return item;
   }
   async function createSession(backup, options, expectedPlanId) {
@@ -234,22 +234,66 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
       throw error;
     }
   }
-  // No HTTP release endpoint: future Phase 4C must call this explicitly after
-  // verification. RELEASED is irreversible and disables automatic rollback.
-  async function release(id, expectedVersion) {
-    let session = await getSession(id);
-    requireValue(expectedVersion === session.version, "Release version conflict", "CONFLICT");
-    requireValue(["VERIFIED", "RELEASED"].includes(session.state), "Verify before releasing", "SESSION_STATE");
-    if (session.state === "VERIFIED") {
-      await verify(id);
-      await store.transact([store.put(revise(session, { state: "RELEASED", lockState: "RELEASING", releasedAt: clock() }), session)]); session = await getSession(id);
+  // Read-only authority for release and cutover. No verify/error-recording writes.
+  async function inspectRelease(session) {
+    requireValue(session.registeredCount === session.total && session.confirmedCount === session.total && session.rolledBackCount === 0 && session.verification?.workspaceHash === session.expectedWorkspaceHash && session.verifiedAt, "Verify and complete all operations first", "RELEASE_BLOCKED");
+    const receipts = await allOperations(session); const ordered = [...receipts].reverse(); const items = [];
+    for (const [index, receipt] of ordered.entries()) {
+      const released = index < session.releasedCount;
+      requireValue(receipt.state === "CONFIRMED" && Boolean(receipt.releasedAt) === released, "Receipt release cursor differs", "INTEGRITY_CONFLICT");
+      items.push(await ownedTarget(receipt, !released));
     }
-    if (session.releasedCount === session.total) return session;
-    const receipts = await allOperations(session); const receipt = receipts[session.releasedCount];
-    const item = await ownedTarget(receipt); const unlocked = revise(item, { migrationLock: false });
-    const releasedCount = session.releasedCount + 1;
+    const roots = items.filter(item => item.entityType === "WORKSPACE");
+    requireValue(roots.length === 1 && ordered.at(-1).operation.targetId === roots[0].id, "Workspace must be released last", "INTEGRITY_CONFLICT");
+    requireValue(items.every(item => item === roots[0] || item.workspaceId === roots[0].id), "Cross-workspace target", "INTEGRITY_CONFLICT");
+    const workspace = restoreWorkspace(items);
+    const counts = { workspaces: 1, boards: workspace.boards.length, tasks: workspace.boards.reduce((n, board) => n + board.tasks.length, 0), widgets: workspace.boards.reduce((n, board) => n + (board.widgets?.length || 0), 0), subtasks: workspace.boards.reduce((n, board) => n + board.tasks.reduce((n, task) => n + (task.subtasks?.length || 0), 0), 0) };
+    requireValue(hash(workspace) === session.expectedWorkspaceHash && hash(counts) === hash(session.counts) && hash(counts) === hash(session.verification.counts), "Verified source or counts changed", "INTEGRITY_CONFLICT");
+    for (const board of items.filter(item => item.entityType === "BOARD")) {
+      const children = items.filter(item => item.boardId === board.id);
+      requireValue(board.taskCount === children.filter(item => item.entityType === "TASK").length && board.widgetCount === children.filter(item => item.entityType === "WIDGET").length && board.doingCount === children.filter(item => item.entityType === "TASK" && item.data.status === "doing").length && board.doingCount <= board.data.wipLimit, "Board counters changed", "INTEGRITY_CONFLICT");
+    }
+    return { ordered, items, root: roots[0], workspace };
+  }
+  async function releasePreview(id, expectedVersion) {
+    const session = await getSession(id);
+    requireValue(Number.isSafeInteger(expectedVersion) && expectedVersion === session.version, "Release preview version conflict", "CONFLICT");
+    const result = { migrationId: id, sessionVersion: session.version, eligible: false, blockers: [], verificationHash: null,
+      confirmedCount: session.confirmedCount, totalCount: session.total, releasedCount: session.releasedCount, lockState: session.lockState, nextAction: null };
+    try {
+      if (session.state === "RELEASED" && session.lockState === "RELEASED" && session.releaseProtocolVersion === 2 && session.releasedCount === session.total) {
+        const root = await store.get(session.releaseWorkspaceId);
+        requireValue(root?.entityType === "WORKSPACE" && root.schemaVersion === 1 && root.migrationLock === false && root.migrationReleaseVersion === 2 && root.migrationOwner?.migrationId === id, "Released workspace certificate is missing", "INTEGRITY_CONFLICT");
+        return { ...result, eligible: true, verificationHash: session.releaseVerificationHash };
+      }
+      requireValue((session.state === "VERIFIED" && session.lockState === "HELD" && session.releasedCount === 0) || (session.state === "RELEASING" && session.lockState === "RELEASING" && session.releaseProtocolVersion === 2), "Session is not safely releasable (legacy partial releases require review)", "RELEASE_BLOCKED");
+      const inspected = await inspectRelease(session);
+      result.verificationHash = session.releaseVerificationHash || hash({ migrationId: id, manifestHash: session.manifestHash, sourceRevision: session.sourceRevision, targets: inspected.ordered.map(receipt => [receipt.operation.targetId, receipt.managedVersion, receipt.managedHash]) });
+      result.eligible = true; result.nextAction = session.state === "RELEASING" ? "resume-release" : "start-release";
+    } catch (error) { if (!(error instanceof DataError) || error.code === "STORAGE") throw error; result.blockers.push({ code: error.code }); }
+    return result;
+  }
+  async function release(id, expectedVersion, expectedVerificationHash, confirmation) {
+    validHash(expectedVerificationHash); requireValue(confirmation === id, "Explicit release confirmation required");
+    const session = await getSession(id);
+    // A lost response may be replayed with an earlier version, but never advances twice.
+    if (session.releaseProtocolVersion === 2 && session.releaseVerificationHash === expectedVerificationHash && Number.isSafeInteger(expectedVersion) && expectedVersion >= session.releaseRequestVersion && expectedVersion < session.version && ["RELEASING", "RELEASED"].includes(session.state)) return session;
+    const preview = await releasePreview(id, expectedVersion);
+    requireValue(preview.eligible, "Release is blocked; inspect release-preview", "RELEASE_BLOCKED");
+    requireValue(preview.verificationHash === expectedVerificationHash, "Release verification changed", "VERIFICATION_STALE");
+    if (session.state === "RELEASED") return session;
+    const { ordered, root } = await inspectRelease(session);
+    if (session.state === "VERIFIED") {
+      // Root snapshot + session CAS serializes against rollback and root changes.
+      await store.transact([store.check(root), store.put(revise(session, { state: "RELEASING", lockState: "RELEASING", releaseProtocolVersion: 2, releaseWorkspaceId: root.id, releaseRequestVersion: expectedVersion, releaseVerificationHash: expectedVerificationHash, releaseStartedAt: clock() }), session)]);
+      return getSession(id);
+    }
+    const receipt = ordered[session.releasedCount]; const item = await ownedTarget(receipt);
+    const releasedCount = session.releasedCount + 1; const final = releasedCount === session.total;
+    const unlocked = revise(item, { migrationLock: false, ...(final ? { migrationReleaseVersion: 2 } : {}) });
+    requireValue(!final || item.id === root.id, "Only final transaction can release workspace barrier", "INTEGRITY_CONFLICT");
     await store.transact([store.put(unlocked, item, true), store.put(revise(receipt, { managedVersion: unlocked.version, managedHash: hash(unlocked), releasedAt: clock() }), receipt),
-      store.put(revise(session, { releasedCount, lockState: releasedCount === session.total ? "RELEASED" : "RELEASING" }), session)]);
+      ...(!final ? [store.check(root)] : []), store.put(revise(session, { releasedCount, ...(final ? { state: "RELEASED", lockState: "RELEASED", releasedAt: clock() } : {}) }), session)]);
     return getSession(id);
   }
   async function listOperations(id, { cursor = 0, limit = 25 } = {}) {
@@ -261,5 +305,5 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     }
     return { items, nextCursor: cursor + items.length < session.registeredCount ? String(cursor + items.length) : null };
   }
-  return { createSession, getSession, getOperation, listOperations, execute, verify, rollbackPreview, rollback, release };
+  return { createSession, getSession, getOperation, listOperations, execute, verify, rollbackPreview, rollback, releasePreview, release };
 }

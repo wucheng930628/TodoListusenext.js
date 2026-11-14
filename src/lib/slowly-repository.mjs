@@ -14,21 +14,35 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   function put(item, previous) {
     assertItemSize(item);
     if (previous) requireValue(previous.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
-    return { Put: { TableName: tableName, Item: item, ConditionExpression: previous ? "#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)" : "attribute_not_exists(id)", ...(previous ? { ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock" }, ExpressionAttributeValues: { ":v": previous.version, ":t": previous.entityType, ":unlocked": false } } : {}) } };
+    const migratedRoot = previous?.entityType === "WORKSPACE" && Object.hasOwn(previous, "migrationOwner");
+    if (migratedRoot) requireValue(previous.migrationReleaseVersion === 2, "Workspace release protocol is not certified", "MIGRATION_LOCKED");
+    return { Put: { TableName: tableName, Item: item, ConditionExpression: previous ? `#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)${migratedRoot ? " AND #release = :protocol" : ""}` : "attribute_not_exists(id)", ...(previous ? { ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock", ...(migratedRoot ? { "#release": "migrationReleaseVersion" } : {}) }, ExpressionAttributeValues: { ":v": previous.version, ":t": previous.entityType, ":unlocked": false, ...(migratedRoot ? { ":protocol": 2 } : {}) } } : {}) } };
   }
   function remove(item) {
     requireValue(item.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
     return { Delete: { TableName: tableName, Key: { id: item.id }, ConditionExpression: "#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)", ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock" }, ExpressionAttributeValues: { ":v": item.version, ":t": item.entityType, ":unlocked": false } } };
   }
   async function commit(actions) {
+    const roots = new Set(actions.filter(action => action.Put).map(action => action.Put.Item.entityType === "WORKSPACE" ? action.Put.Item.id : action.Put.Item.workspaceId).filter(Boolean));
+    requireValue(roots.size <= 1, "A write cannot span workspaces");
+    for (const workspaceId of roots) {
+      if (actions.some(action => action.Put?.Item.id === workspaceId)) continue; // Existing root Put already checks lock atomically.
+      const workspace = await get("WORKSPACE", workspaceId);
+      requireValue(workspace.migrationLock !== true, "Workspace migration barrier is held", "MIGRATION_LOCKED");
+      requireValue(!Object.hasOwn(workspace, "migrationOwner") || workspace.migrationReleaseVersion === 2, "Workspace release protocol is not certified", "MIGRATION_LOCKED");
+      actions.push({ ConditionCheck: { TableName: tableName, Key: { id: workspaceId },
+        ConditionExpression: "#t = :t AND #s = :s AND (attribute_not_exists(#lock) OR #lock = :unlocked) AND (attribute_not_exists(#owner) OR #release = :protocol)",
+        ExpressionAttributeNames: { "#t": "entityType", "#s": "schemaVersion", "#lock": "migrationLock", "#owner": "migrationOwner", "#release": "migrationReleaseVersion" },
+        ExpressionAttributeValues: { ":t": "WORKSPACE", ":s": 1, ":unlocked": false, ":protocol": 2 } } });
+    }
     requireValue(actions.length <= 100 && Buffer.byteLength(JSON.stringify(actions)) < 3500000, "Transaction too large");
     try { await db.send(new TransactWriteCommand({ TransactItems: actions })); }
     catch (error) {
       if (["ConditionalCheckFailedException", "TransactionConflictException"].includes(error.name) || (error.name === "TransactionCanceledException" && error.CancellationReasons?.some(reason => ["ConditionalCheckFailed", "TransactionConflict"].includes(reason.Code)))) {
         for (const action of actions) {
-          const id = action.Put?.Item.id || action.Delete?.Key.id;
+          const id = action.Put?.Item.id || action.Delete?.Key.id || action.ConditionCheck?.Key.id;
           const current = await db.send(new GetCommand({ TableName: tableName, Key: { id }, ConsistentRead: true }));
-          if (current.Item?.migrationLock === true) throw new DataError("MIGRATION_LOCKED", "Migration lock is held", { cause: error });
+          if (current.Item?.migrationLock === true || (current.Item?.entityType === "WORKSPACE" && Object.hasOwn(current.Item, "migrationOwner") && current.Item.migrationReleaseVersion !== 2)) throw new DataError("MIGRATION_LOCKED", "Migration lock is held", { cause: error });
         }
         throw new DataError("CONFLICT", "Concurrent change; reload before retrying", { cause: error });
       }
@@ -98,7 +112,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   }
   async function reorder(type, parentId, entries) {
     requireValue(["BOARD", "TASK", "WIDGET"].includes(type), "Unsupported order type");
-    requireValue(Array.isArray(entries) && entries.length > 0 && entries.length <= 99 && new Set(entries.map(entry => entry.id)).size === entries.length, "Supply 1–99 unique order entries");
+    requireValue(Array.isArray(entries) && entries.length > 0 && entries.length <= (type === "BOARD" ? 99 : 98) && new Set(entries.map(entry => entry.id)).size === entries.length, "Order exceeds atomic capacity (boards: 99; children: 98)");
     const parent = await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parentId);
     const items = await Promise.all(entries.map(async entry => {
       const old = await get(type, entry.id); expected(old, entry.version);

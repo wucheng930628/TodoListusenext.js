@@ -34,7 +34,7 @@ export class MemoryClient {
     }
     assert.equal(type, "TransactWriteCommand");
     if (this.beforeTransaction) await this.beforeTransaction(input);
-    const actions = input.TransactItems.map(action => ({ kind: action.Put ? "put" : "delete", value: action.Put || action.Delete }));
+    const actions = input.TransactItems.map(action => ({ kind: action.Put ? "put" : action.Delete ? "delete" : "check", value: action.Put || action.Delete || action.ConditionCheck }));
     assert.equal(new Set(actions.map(({ value }) => value.Item?.id || value.Key.id)).size, actions.length);
     for (const { value } of actions) {
       const existing = this.items.get(value.Item?.id || value.Key.id);
@@ -42,7 +42,7 @@ export class MemoryClient {
       if (!valid) throw Object.assign(new Error("Condition failed"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }] });
     }
     for (const { kind, value } of actions) {
-      if (kind === "put") this.items.set(value.Item.id, structuredClone(value.Item)); else this.items.delete(value.Key.id);
+      if (kind === "put") this.items.set(value.Item.id, structuredClone(value.Item)); else if (kind === "delete") this.items.delete(value.Key.id);
     }
     if (this.afterTransaction) await this.afterTransaction(input);
     return {};

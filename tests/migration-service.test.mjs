@@ -124,7 +124,7 @@ test("unsupported schemas, legacy settings and Widget presence tampering are blo
   await assert.rejects(f.service.getOperation(f.plan.migrationId, op.operationId), { code: "INTEGRITY_CONFLICT" });
 });
 
-test("CRUD lock covers all protected writes and keeps the original 99-entry reorder capacity", async () => {
+test("CRUD locks all writes and reserves workspace barrier capacity in child ordering", async () => {
   const f = migrationFixture(); await f.apply();
   const ws = f.plan.operations[0]; const boardOp = f.plan.operations.find(op => op.type === "BOARD");
   const board = await f.repository.getBoard(boardOp.targetId);
@@ -154,7 +154,8 @@ test("CRUD lock covers all protected writes and keeps the original 99-entry reor
   const root = await repo.createWorkspace({}); const b = await repo.createBoard(root.id, { id: "sort", name: "sort", description: "", wipLimit: 4 });
   const widgets = [];
   for (let i = 0; i < 99; i++) widgets.push(await repo.createWidget(b.id, { id: `w-${i}`, type: "note", span: 6, height: 260, config: {} }, i));
-  await repo.reorderWidgets(b.id, widgets.map((widget, index) => ({ id: widget.id, version: widget.version, position: 98 - index })));
+  await assert.rejects(repo.reorderWidgets(b.id, widgets.map((widget, index) => ({ id: widget.id, version: widget.version, position: 98 - index }))), { code: "VALIDATION" });
+  await repo.reorderWidgets(b.id, widgets.slice(0, 98).map((widget, index) => ({ id: widget.id, version: widget.version, position: 97 - index })));
   assert.equal(db.calls.at(-1).input.TransactItems.length, 100);
 });
 
@@ -250,9 +251,10 @@ test("rollback detects an ownership/data race at delete time and never deletes t
 
 test("release is explicit, resumable and irreversible; verified alone never unlocks CRUD", async () => {
   const f = migrationFixture(); await f.apply(); await f.service.verify(f.plan.migrationId);
-  for (let i = 0; i < f.plan.operations.length; i++) {
+  for (let i = 0; i <= f.plan.operations.length; i++) {
     const session = await f.service.getSession(f.plan.migrationId);
-    await f.service.release(f.plan.migrationId, session.version);
+    const preview = await f.service.releasePreview(f.plan.migrationId, session.version);
+    await f.service.release(f.plan.migrationId, session.version, preview.verificationHash, f.plan.migrationId);
   }
   const session = await f.service.getSession(f.plan.migrationId); assert.equal(session.lockState, "RELEASED");
   assert.equal((await f.service.rollbackPreview(f.plan.migrationId)).canRollback, false);
