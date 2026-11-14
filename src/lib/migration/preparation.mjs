@@ -68,6 +68,7 @@ export function previewMigration(input, { sourceNamespace, legacyBoard } = {}) {
   inspectNumbers(workspace, "$");
   function add(type, value, path, sourcePath, parentId, boardId, position) {
     try {
+      if (value?.schemaVersion !== undefined && value.schemaVersion !== 1) issue("UNSUPPORTED_SCHEMA_VERSION", `${path}.schemaVersion`, "Source schemaVersion is not supported.");
       const data = fromFrontend(type, value);
       const targetId = candidateId(sourceNamespace, type, sourcePath);
       if (ids.has(targetId)) issue("MAPPING_COLLISION", path, "Two source entities map to the same target id.");
@@ -75,7 +76,7 @@ export function previewMigration(input, { sourceNamespace, legacyBoard } = {}) {
       const entity = { key: JSON.stringify([type, sourcePath]), type, source: { storageKey: selected.key, path, identity: sourcePath }, targetId, parentId, workspaceId, boardId, position, data };
       if (type === "BOARD") entity.source.widgetsPresent = Object.hasOwn(value, "widgets");
       assertItemSize(entity);
-      entity.fingerprint = digest({ type, parentId, workspaceId, boardId, position, data });
+      entity.fingerprint = digest({ type, parentId, workspaceId, boardId, position, data, widgetsPresent: entity.source.widgetsPresent ?? null });
       entities.push(entity);
       if (value.position !== undefined && value.position !== position) issue("POSITION_DIFFERS_FROM_ARRAY", `${path}.position`, "UI order comes from the array; the extra position field is preserved without overriding it.", "warning");
       for (const key of Object.keys(data)) if (!apiFields[type].includes(key)) issue("API_FIELD_UNSUPPORTED", `${path}.${key}`, "Field is preserved but cannot be imported through the current CRUD API.", "blocker");
@@ -102,9 +103,13 @@ export function previewMigration(input, { sourceNamespace, legacyBoard } = {}) {
       const entity = add("TASK", task, taskPath, [...sourcePath, "task", task?.id ?? null], boardId, boardId, t);
       if (task?.status !== "done" && task?.completedAt != null) issue("COMPLETION_TIME_CONFLICT", `${taskPath}.completedAt`, "A non-done task has a completion timestamp. Repository writes would clear it; resolve explicitly before migration.");
       if (task?.boardId !== undefined && task.boardId !== board.id) issue("PARENT_MISMATCH", `${taskPath}.boardId`, "Explicit task parent disagrees with nesting.");
+      if (task?.workspaceId !== undefined && task.workspaceId !== workspace.id) issue("PARENT_MISMATCH", `${taskPath}.workspaceId`, "Explicit task workspace disagrees with nesting.");
       if (Array.isArray(task?.subtasks)) {
         counts.subtasks += task.subtasks.length; unique(task.subtasks, `${taskPath}.subtasks`, "Subtask");
-        for (let s = 0; s < task.subtasks.length; s++) subtasks.push({ sourcePath: `${taskPath}.subtasks[${s}]`, targetTaskId: entity?.targetId ?? null, frontendId: task.subtasks[s]?.id, storage: "inline" });
+        for (let s = 0; s < task.subtasks.length; s++) {
+          if (task.subtasks[s]?.schemaVersion !== undefined && task.subtasks[s].schemaVersion !== 1) issue("UNSUPPORTED_SCHEMA_VERSION", `${taskPath}.subtasks[${s}].schemaVersion`, "Subtask schemaVersion is not supported.");
+          subtasks.push({ sourcePath: `${taskPath}.subtasks[${s}]`, targetTaskId: entity?.targetId ?? null, frontendId: task.subtasks[s]?.id, storage: "inline" });
+        }
       }
     }
     if (board.widgets === undefined) issue("IMPLICIT_WIDGETS", path, "UI renders a default analytics widget when widgets is absent. Phase 4B must explicitly preserve this distinction.", "warning");
@@ -115,6 +120,7 @@ export function previewMigration(input, { sourceNamespace, legacyBoard } = {}) {
         const widget = board.widgets[w]; const widgetPath = `${path}.widgets[${w}]`;
         add("WIDGET", widget, widgetPath, [...sourcePath, "widget", widget?.id ?? null], boardId, boardId, w);
         if (widget?.boardId !== undefined && widget.boardId !== board.id) issue("PARENT_MISMATCH", widgetPath, "Explicit widget parent disagrees with nesting.");
+        if (widget?.workspaceId !== undefined && widget.workspaceId !== workspace.id) issue("PARENT_MISMATCH", widgetPath, "Explicit widget workspace disagrees with nesting.");
         if (widget?.config?.taskId && !board.tasks.some(task => task?.id === widget.config.taskId)) issue("DANGLING_TIMER_TASK", widgetPath, "Timer task reference is not in its board; it is preserved, not silently removed.", "warning");
       }
     }
@@ -147,7 +153,7 @@ function assertPlan(plan) {
   for (const entity of plan.operations) {
     requireState(!ids.has(entity.targetId) && !keys.has(entity.key), "Duplicate operation mapping."); ids.add(entity.targetId); keys.add(entity.key);
     requireState(entity.targetId === candidateId(plan.sourceNamespace, entity.type, entity.source.identity), "Target mapping mismatch.");
-    requireState(entity.fingerprint === digest({ type: entity.type, parentId: entity.parentId, workspaceId: entity.workspaceId, boardId: entity.boardId, position: entity.position, data: entity.data }), "Payload fingerprint mismatch.");
+    requireState(entity.fingerprint === digest({ type: entity.type, parentId: entity.parentId, workspaceId: entity.workspaceId, boardId: entity.boardId, position: entity.position, data: entity.data, widgetsPresent: entity.source.widgetsPresent ?? null }), "Payload fingerprint mismatch.");
     requireState(entity.operationId === digest([plan.planId, entity.key]), "Operation identity mismatch.");
   }
   for (const entity of plan.operations) requireState(entity.parentId === null || ids.has(entity.parentId), "Missing parent mapping.");
@@ -210,7 +216,7 @@ export function reconcileMigration(plan, checkpoint, observations) {
       continue;
     }
     if (observation.state !== "present") { if (entry.state !== "confirmed") entry.state = "unknown"; continue; }
-    const fingerprint = digest({ type: observation.type, parentId: observation.parentId, workspaceId: observation.workspaceId, boardId: observation.boardId, position: observation.position, data: observation.data });
+    const fingerprint = digest({ type: observation.type, parentId: observation.parentId, workspaceId: observation.workspaceId, boardId: observation.boardId, position: observation.position, data: observation.data, widgetsPresent: observation.source?.widgetsPresent ?? null });
     if (observation.targetId !== operation.targetId || observation.operationId !== operation.operationId || observation.planId !== plan.planId || fingerprint !== operation.fingerprint ||
       !Number.isSafeInteger(observation.version) || observation.version < 1 || (entry.expectedVersion !== null && entry.expectedVersion !== observation.version)) {
       entry.state = "conflict"; entry.errorCode = "TARGET_OR_VERSION_CONFLICT";
