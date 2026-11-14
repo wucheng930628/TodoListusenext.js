@@ -13,7 +13,8 @@
     "dev:api": "node scripts/dev-local-api.mjs",
     "test:api": "node --conditions=react-server --test tests/api.test.mjs",
     "test:api:http": "node --conditions=react-server scripts/phase3-http-test.mjs",
-    "test:phase4a": "node --conditions=react-server --test tests/client-adapter.test.mjs tests/workspace-backup.test.mjs tests/migration-preparation.test.mjs tests/adapter-api.integration.test.mjs"
+    "test:phase4a": "node --conditions=react-server --test tests/client-adapter.test.mjs tests/workspace-backup.test.mjs tests/migration-preparation.test.mjs tests/adapter-api.integration.test.mjs",
+    "test:migration": "node --conditions=react-server --test tests/migration-service.test.mjs tests/migration-api.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
