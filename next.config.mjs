@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Keep the isolated API test server separate from an existing next dev session.
-  distDir: process.env.SLOWLY_CONTROLLED_UI_RUN_ID ? ".next-controlled-ui" : process.env.SLOWLY_API_TEST === "1" ? ".next-phase3-api" : ".next",
+  distDir: process.env.SLOWLY_MAIN_UI_TEST === "1" ? ".next-main-ui" : process.env.SLOWLY_CONTROLLED_UI_RUN_ID ? ".next-controlled-ui" : process.env.SLOWLY_API_TEST === "1" ? ".next-phase3-api" : ".next",
   /* config options here */
   turbopack: {
     rules: {

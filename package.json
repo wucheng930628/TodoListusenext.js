@@ -21,7 +21,10 @@
     "test:db:controlled-ui": "node --import ./tests/helpers/server-only-loader.mjs scripts/phase4b2-integration.mjs",
     "test:release": "node --conditions=react-server --test tests/release.test.mjs",
     "test:cutover-react": "node --import ./tests/helpers/server-only-loader.mjs --test tests/cutover-react.test.mjs",
-    "test:db:release": "node --import ./tests/helpers/server-only-loader.mjs scripts/phase4c1-integration.mjs"
+    "test:db:release": "node --import ./tests/helpers/server-only-loader.mjs scripts/phase4c1-integration.mjs",
+    "test:main-ui": "node --import ./tests/helpers/server-only-loader.mjs --test tests/main-ui.test.mjs",
+    "test:main-ui:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/main-ui-react.test.mjs",
+    "test:db:main-ui": "node --import ./tests/helpers/ui-module-loader.mjs scripts/phase4c2-integration.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
