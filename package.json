@@ -16,7 +16,9 @@
     "test:phase4a": "node --conditions=react-server --test tests/client-adapter.test.mjs tests/workspace-backup.test.mjs tests/migration-preparation.test.mjs tests/adapter-api.integration.test.mjs",
     "test:migration": "node --conditions=react-server --test tests/migration-service.test.mjs tests/migration-api.test.mjs",
     "test:react-api": "node --test tests/react-api-hooks.test.mjs tests/resource-controller.test.mjs",
-    "test:db:migration": "node --conditions=react-server scripts/phase4b1-dynamodb-test.mjs"
+    "test:db:migration": "node --conditions=react-server scripts/phase4b1-dynamodb-test.mjs",
+    "test:controlled-ui": "node --import ./tests/helpers/server-only-loader.mjs --test tests/controlled-ui.test.mjs tests/controlled-view.test.mjs",
+    "test:db:controlled-ui": "node --import ./tests/helpers/server-only-loader.mjs scripts/phase4b2-integration.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
