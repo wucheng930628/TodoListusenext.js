@@ -9,6 +9,7 @@ test("adapter covers every current endpoint and preserves the DTO envelope and w
   const api = createSlowlyApi({ fetchImpl: async (path, init) => { calls.push({ path, init }); return init.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json({ data: { id, version: 4, data: { title: "保留" } } }); } });
   const cases = [
     ["listWorkspaces", [{ id }], "GET", "/api/workspaces"], ["createWorkspace", [input], "POST", "/api/workspaces"], ["getWorkspace", [id], "GET", `/api/workspaces/${encodeURIComponent(id)}`], ["updateWorkspace", [id, input], "PATCH", `/api/workspaces/${encodeURIComponent(id)}`],
+    ["getWorkspaceView", [id], "GET", `/api/workspaces/${encodeURIComponent(id)}/view`],
   ];
   for (const resource of ["Board", "Task", "Widget"]) {
     const name = resource.toLowerCase() + "s";
@@ -21,7 +22,7 @@ test("adapter covers every current endpoint and preserves the DTO envelope and w
     if (verb !== "GET") assert.deepEqual(JSON.parse(call.init.body), input);
     if (verb === "DELETE") assert.equal(result, null); else assert.equal(result.version, 4);
   }
-  assert.equal(calls.length, 22);
+  assert.equal(calls.length, 23);
   assert.equal(new URL(calls[0].path, "http://local").searchParams.get("id"), id);
   assert.ok(calls[0].path.includes(encodeURIComponent(id)));
   await api.listTasks({ boardId: id, workspaceId: "space#with&=" });

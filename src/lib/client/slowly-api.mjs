@@ -60,6 +60,7 @@ export function createSlowlyApi({ fetchImpl = (...args) => globalThis.fetch(...a
     listWorkspaces: (query = {}, options) => request("GET", url("workspaces", undefined, query), undefined, options),
     createWorkspace: (input, options) => request("POST", url("workspaces"), input, options),
     getWorkspace: (id, options) => request("GET", itemUrl("workspaces", id), undefined, options),
+    getWorkspaceView: (id, options) => request("GET", `${itemUrl("workspaces", id)}/view`, undefined, options),
     updateWorkspace: (id, input, options) => request("PATCH", itemUrl("workspaces", id), input, options),
     listBoards: (query, options) => request("GET", url("boards", undefined, query), undefined, options),
     createBoard: (input, options) => request("POST", url("boards"), input, options),
