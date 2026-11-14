@@ -170,6 +170,11 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const repo = await getRepository(); const previous = await repo[`get${singular}`](id);
       await assertScope(repo, previous, input, true);
       const data = { ...previous.data, ...input.data };
+      if (resource === "widgets" && input.data.config !== undefined) {
+        // Preserve imported extension fields while keeping existing known-config replacement semantics.
+        const known = new Set(["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
+        data.config = { ...Object.fromEntries(Object.entries(previous.data.config || {}).filter(([key]) => !known.has(key))), ...input.data.config };
+      }
       if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
       let item;
       if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
@@ -193,7 +198,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
     orderPatch: wrap(async request => {
       requireValue(resource !== "workspaces", "Unsupported ordering", "NOT_SUPPORTED");
       query(request, []); const input = await body(request); keys(input, ["entries", ...scopeKeys]);
-      requireValue(Array.isArray(input.entries) && input.entries.length > 0 && input.entries.length <= 99, "Invalid ordering entries");
+      requireValue(Array.isArray(input.entries) && input.entries.length > 0 && input.entries.length <= (resource === "boards" ? 99 : 98), "Invalid ordering entries");
       for (const entry of input.entries) { keys(entry, ["id", "version", "position"]); assertId(entry.id, type); version(entry.version); requireValue(entry.position !== undefined, "Position required"); position(entry.position); }
       requireValue(new Set(input.entries.map(entry => entry.id)).size === input.entries.length, "Duplicate order entries");
       const parent = resource === "boards" ? input.workspaceId : input.boardId;
