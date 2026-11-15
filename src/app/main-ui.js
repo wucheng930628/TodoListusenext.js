@@ -45,10 +45,17 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
       {state.error && <p role="alert">{state.error.status ? `${state.error.status} ` : ""}{state.error.message}</p>}
       {state.mode === "api" && state.status === "loading" && <p role="status">讀取 API 資料中…</p>}
       {state.uncertainWrite && <p role="alert">寫入結果尚未確認，已暫停後續寫入。請先核對資料，不要重送新增。</p>}
+      {state.mode === "api" && state.uncertainWrite && state.createRecovery && <div>
+        <p role="status">新增操作 {state.createRecovery.operationKey} · {state.createRecovery.state}{state.createRecovery.receiptState === "NOT_FOUND" ? "（尚未查到 Receipt，結果仍不明）" : ""}</p>
+        <button type="button" disabled={state.createRecovery.checking || state.mutation === "loading"} onClick={() => void attempt(controller.recoverCreate)}>查詢新增結果</button>
+        <button type="button" disabled={state.createRecovery.checking || state.mutation === "loading" || state.createRecovery.state === "CONFLICT"} onClick={() => {
+          if (window.confirm("使用原 Operation Key 與原始內容安全重送這次新增？")) void attempt(() => controller.resendCreate(confirmation));
+        }}>以原 Key 與原內容重送</button>
+      </div>}
     </section>}
     {state.mode === "localStorage" ? isolationEntry ? <p>隔離測試入口尚未啟用 API；不讀寫本機資料。</p> : <WorkspaceBoard key="local" />
       : state.projection ? state.projection.workspace.boards.length ?
-        <WorkspaceBoard key={`${state.workspaceId}:${state.activeBoardId}`} apiSession={createMainUiSession(state)} /> :
+        <WorkspaceBoard key={`${state.workspaceId}:${state.activeBoardId}:${state.recoveredCreateRevision}`} apiSession={createMainUiSession(state)} /> :
         <EmptyApiWorkspace state={state} onError={setMessage} /> : <main className="content"><p>{state.status === "error" ? "API 載入失敗，沒有切回本機資料或建立預設看板。" : "正在確認 Workspace 與 Readiness…"}</p></main>}
   </>;
 }

@@ -1,16 +1,19 @@
 import { createSlowlyApi, SlowlyApiError } from "./slowly-api.mjs";
 import { projectMainView, reference, encodeMainPatch, encodeMainCreate } from "./main-view-model.mjs";
+import { createSafeCreateIntent } from "./safe-create.mjs";
 
 const error = (code, message) => new SlowlyApiError(message, { code, outcome: "not-sent" });
 export function createMainWorkspaceController({ api = createSlowlyApi(), readView = api.getWorkspaceView, development = process.env.NODE_ENV === "development" } = {}) {
-  let state = { mode: "localStorage", status: "idle", workspaceId: null, activeBoardId: null, projection: null, allowWrites: false, mutation: "idle", error: null, uncertainWrite: false, operation: null, scopeRevision: 0 };
+  let state = { mode: "localStorage", status: "idle", workspaceId: null, activeBoardId: null, projection: null, allowWrites: false, mutation: "idle", error: null, uncertainWrite: false, operation: null, createRecovery: null, recoveredCreateRevision: 0, scopeRevision: 0 };
   const initial = state; const listeners = new Set(); let epoch = 0; let readAbort; let writeAbort; let pending = false;
   const drafts = new Map(); // Page-memory only; never mixed into DTOs or localStorage.
+  let createIntent;
   const publish = patch => { state = { ...state, ...patch }; for (const listener of listeners) listener(); };
   const currentBoard = () => state.projection?.workspace.boards.find(board => board.id === state.activeBoardId);
   function cancel() {
     epoch++; readAbort?.abort(); writeAbort?.abort();
-    publish({ ...(pending ? { uncertainWrite: true, mutation: "not-confirmed", allowWrites: false } : {}), status: state.projection ? "success" : "idle" });
+    publish({ ...(pending ? { uncertainWrite: true, mutation: "not-confirmed", allowWrites: false,
+      ...(createIntent ? { createRecovery: { operationKey: createIntent.operationKey, state: "UNKNOWN", checking: false } } : {}) } : {}), status: state.projection ? "success" : "idle" });
   }
   async function refresh() {
     if (state.mode !== "api") return;
@@ -39,10 +42,47 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
   function requireWritable() {
     if (state.mode !== "api" || state.status !== "success" || !state.allowWrites || state.uncertainWrite || pending) throw error("WRITES_DISABLED", "唯讀、結果不明或仍有操作進行，不能寫入。");
   }
-  async function mutate(action, kind, invoke, merge) {
+  async function recoverCreate() {
+    if (!createIntent || pending || state.mode !== "api" || state.workspaceId !== createIntent.scope.workspaceId) throw error("RECOVERY_REQUIRED", "請切回原 Workspace，再查詢新增結果。");
+    const intent = createIntent;
+    const current = ++epoch;
+    publish({ createRecovery: { operationKey: intent.operationKey, state: "UNKNOWN", checking: true }, allowWrites: false });
+    try {
+      const receipt = await intent.lookup();
+      if (current !== epoch) return null;
+      if (receipt.state === "CONFIRMED") {
+        // Refresh current server state, including later edits or deletion. Never merge the original create DTO.
+        await refresh();
+        if (createIntent !== intent || state.mode !== "api" || state.workspaceId !== intent.scope.workspaceId || state.status !== "success") return null;
+        createIntent = null;
+        publish({ uncertainWrite: false, mutation: "success", error: null, recoveredCreateRevision: state.recoveredCreateRevision + 1,
+          createRecovery: { operationKey: intent.operationKey, state: "CONFIRMED", checking: false } });
+        return receipt;
+      }
+      publish({ createRecovery: { operationKey: intent.operationKey, state: "UNKNOWN", receiptState: "NOT_FOUND", checking: false } });
+      return receipt;
+    } catch (cause) {
+      if (state.mode === "api" && state.workspaceId === intent.scope.workspaceId && createIntent === intent) publish({ createRecovery: { operationKey: intent.operationKey, state: cause.code === "OPERATION_CONFLICT" ? "CONFLICT" : "UNKNOWN", checking: false }, error: cause });
+      throw cause;
+    }
+  }
+  async function resendCreate(confirmation) {
+    if (!createIntent || pending || state.createRecovery?.checking || state.createRecovery?.state === "CONFLICT" || confirmation !== state.workspaceId || state.mode !== "api" || state.workspaceId !== createIntent.scope.workspaceId) throw error("RECOVERY_REQUIRED", "請確認原 Workspace 與新增操作。");
+    const receipt = await recoverCreate();
+    if (!receipt || receipt.state === "CONFIRMED") return receipt;
+    const intent = createIntent;
+    pending = true;
+    publish({ mutation: "loading" });
+    try { await intent.resend(); }
+    catch (cause) { publish({ error: cause }); }
+    finally { pending = false; publish({ mutation: "not-confirmed", uncertainWrite: true }); }
+    return recoverCreate();
+  }
+  async function mutate(action, kind, invoke, merge, intent) {
     requireWritable();
     const projection = state.projection; const workspaceId = state.workspaceId; const boardId = state.activeBoardId; const current = ++epoch;
     readAbort?.abort(); writeAbort = new AbortController(); const signal = writeAbort.signal; pending = true;
+    if (intent) createIntent = intent;
     publish({ mutation: "loading", error: null, operation: { action, kind } }); let result; let acknowledged = false;
     try {
       result = await invoke({ api, projection, workspaceId, boardId, signal });
@@ -50,11 +90,20 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       if (current !== epoch || signal.aborted) return result;
       const snapshot = structuredClone(projection.snapshot); merge(snapshot, result);
       publish({ projection: projectMainView(snapshot, workspaceId), mutation: "success", error: null });
+      if (intent) createIntent = null;
     } catch (cause) {
       if (current === epoch && !signal.aborted) {
         const uncertain = acknowledged || cause.outcome === "not-confirmed" || !cause.code || (action === "create" && ["CONFLICT", "MIGRATION_LOCKED"].includes(cause.code));
+        if (intent && !uncertain) createIntent = null;
         const authorityChanged = cause.code === "MIGRATION_LOCKED" || [403, 404].includes(cause.status);
-        publish({ mutation: uncertain ? "not-confirmed" : "error", error: cause, uncertainWrite: uncertain, ...(uncertain || authorityChanged ? { allowWrites: false } : {}), ...(authorityChanged ? { status: "error" } : {}) });
+        publish({ mutation: uncertain ? "not-confirmed" : "error", error: cause, uncertainWrite: uncertain,
+          ...(intent && uncertain ? { createRecovery: { operationKey: intent.operationKey, state: "UNKNOWN", checking: false } } : {}),
+          ...(uncertain || authorityChanged ? { allowWrites: false } : {}), ...(authorityChanged ? { status: "error" } : {}) });
+        if (intent && uncertain) {
+          pending = false;
+          try { const receipt = await recoverCreate(); if (receipt?.state === "CONFIRMED") return receipt.result; }
+          catch { /* UNKNOWN remains visible until an explicit receipt query succeeds. */ }
+        }
       }
       throw cause;
     } finally { pending = false; }
@@ -86,13 +135,15 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     if (type === "widget" && !existing && !Object.hasOwn(currentBoard(), "widgets") && state.projection.snapshot.readiness?.capabilities?.widgetPresenceWrites !== true) throw error("WIDGET_PRESENCE_REQUIRED", "現有 API 尚不能安全建立缺省 Widget 清單。");
     const rows = type === "board" ? state.projection.snapshot.boards.map(entry => entry.board) : entryFor(state.projection.snapshot, board.databaseId)[type === "task" ? "tasks" : "widgets"];
     const position = Math.max(-1, ...rows.map(row => row.position)) + 1;
+    const createInput = { workspaceId: state.workspaceId, ...(board ? { boardId: board.databaseId } : {}), data: payload, position };
+    const intent = existing ? null : createSafeCreateIntent(api, `${type}s`, createInput);
     return mutate(existing ? "update" : "create", type, ({ api, workspaceId, signal }) => {
       const input = { workspaceId, ...(board ? { boardId: board.databaseId } : {}), data: payload, ...(existing ? { version: ref.version } : { position }) };
-      return existing ? api[`update${name}`](ref.databaseId, input, { signal }) : api[`create${name}`](input, { signal });
+      return existing ? api[`update${name}`](ref.databaseId, input, { signal }) : intent.send({ signal });
     }, (snapshot, result) => {
       if (type === "board") { const entry = entryFor(snapshot, result.id); if (entry) entry.board = result; else snapshot.boards.push({ board: result, tasks: [], widgets: [], widgetsPresence: "absent" }); }
       else { const entry = entryFor(snapshot, board.databaseId); const key = type === "task" ? "tasks" : "widgets"; entry[key] = [...entry[key].filter(item => item.id !== result.id), result]; if (type === "widget") entry.widgetsPresence = "present"; }
-    });
+    }, intent);
   }
   async function removeEntity(type, frontendId, { expectedVersion } = {}) {
     requireWritable();
@@ -116,15 +167,15 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     });
   }
   return {
-    getSnapshot: () => state, getServerSnapshot: () => initial, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }, refresh, authorizeWrites, cancel,
+    getSnapshot: () => state, getServerSnapshot: () => initial, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }, refresh, authorizeWrites, cancel, recoverCreate, resendCreate,
     readDraft: key => structuredClone(drafts.get(key) ?? null),
     writeDraft(key, value) { drafts.set(key, structuredClone(value)); },
     clearDraft(key, expected) { if (expected === undefined || JSON.stringify(drafts.get(key)) === JSON.stringify(expected)) drafts.delete(key); },
     async activate({ workspaceId, apiReady }) {
       if (!development || apiReady !== true || !/^SLOWLY#WORKSPACE#[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(workspaceId || "")) throw error("API_MODE_DISABLED", "僅限開發環境，需明確指定 Workspace 與 API Ready。");
-      cancel(); publish({ ...initial, mode: "api", workspaceId, uncertainWrite: state.uncertainWrite, scopeRevision: state.scopeRevision + 1 }); return refresh();
+      cancel(); publish({ ...initial, mode: "api", workspaceId, uncertainWrite: state.uncertainWrite, createRecovery: state.createRecovery, scopeRevision: state.scopeRevision + 1 }); return refresh();
     },
-    deactivate() { cancel(); publish({ ...initial, uncertainWrite: state.uncertainWrite, scopeRevision: state.scopeRevision + 1 }); },
+    deactivate() { cancel(); publish({ ...initial, uncertainWrite: state.uncertainWrite, createRecovery: state.createRecovery, scopeRevision: state.scopeRevision + 1 }); },
     selectBoard(frontendId) {
       if (!state.projection?.workspace.boards.some(board => board.id === frontendId)) throw error("BOARD_NOT_FOUND", "看板不存在。");
       cancel(); publish({ activeBoardId: frontendId, allowWrites: false, scopeRevision: state.scopeRevision + 1 });

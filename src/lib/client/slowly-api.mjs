@@ -25,19 +25,33 @@ export function createSlowlyApi({ fetchImpl = (...args) => globalThis.fetch(...a
     if (id === undefined) throw new SlowlyApiError("An item id is required.", { code: "INVALID_ARGUMENT", outcome: "not-sent" });
     return url(resource, id, query);
   }
-  async function request(method, path, input, { signal } = {}) {
+  async function request(method, path, input, { signal, operationKey, timeoutMs = operationKey ? 30000 : undefined } = {}) {
+    if (operationKey !== undefined && (method !== "POST" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationKey))) {
+      throw new SlowlyApiError("A UUID v4 create operation key is required.", { code: "INVALID_ARGUMENT", outcome: "not-sent" });
+    }
     let serialized;
     try { if (input !== undefined) serialized = JSON.stringify(input); }
     catch (cause) { throw new SlowlyApiError("Request cannot be serialized as JSON.", { code: "SERIALIZATION_ERROR", method, path, outcome: "not-sent", cause }); }
     let response;
+    if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000)) {
+      throw new SlowlyApiError("Invalid request timeout.", { code: "INVALID_ARGUMENT", outcome: "not-sent" });
+    }
+    const deadline = timeoutMs === undefined ? null : AbortSignal.timeout(timeoutMs);
+    const requestSignal = deadline ? signal ? AbortSignal.any([signal, deadline]) : deadline : signal;
     try {
       response = await fetchImpl(path, {
-        method, headers: { Accept: "application/json", ...(serialized === undefined ? {} : { "Content-Type": "application/json" }) },
-        credentials: "same-origin", mode: "same-origin", cache: "no-store", redirect: "error", signal,
+        method, headers: { Accept: "application/json", ...(serialized === undefined ? {} : { "Content-Type": "application/json" }), ...(operationKey ? { "Idempotency-Key": operationKey } : {}) },
+        credentials: "same-origin", mode: "same-origin", cache: "no-store", redirect: "error", signal: requestSignal,
         ...(serialized === undefined ? {} : { body: serialized }),
       });
     } catch (cause) {
-      throw new SlowlyApiError(cause?.name === "AbortError" ? "Request aborted; write outcome may be unknown." : "Network request failed; write outcome may be unknown.", { code: cause?.name === "AbortError" ? "ABORTED" : "NETWORK_ERROR", method, path, cause });
+      const code = cause?.name === "TimeoutError" ? "TIMEOUT" : cause?.name === "AbortError" ? "ABORTED" : "NETWORK_ERROR";
+      throw new SlowlyApiError("Request did not complete; write outcome may be unknown.", { code, method, path, cause });
+    }
+    if (response.ok && operationKey && (response.headers.get("operation-id") !== operationKey ||
+      !((response.status === 201 && response.headers.get("idempotency-status") === "created") ||
+        (response.status === 200 && response.headers.get("idempotency-status") === "replayed")))) {
+      throw new SlowlyApiError("Server did not confirm the idempotent create protocol. Query the operation before proceeding.", { status: response.status, code: "UNPROTECTED_CREATE_RESPONSE", method, path });
     }
     if (response.status === 204 && response.ok) return null;
     let payload;
@@ -57,6 +71,13 @@ export function createSlowlyApi({ fetchImpl = (...args) => globalThis.fetch(...a
     return payload.data;
   }
   return {
+    async getOperation(operationId, scope, options) {
+      try { return await request("GET", itemUrl("operations", operationId, scope), undefined, options); }
+      catch (error) {
+        if (error.status === 404 && error.code === "OPERATION_NOT_FOUND") return { operationId, state: "NOT_FOUND" };
+        throw error;
+      }
+    },
     listWorkspaces: (query = {}, options) => request("GET", url("workspaces", undefined, query), undefined, options),
     createWorkspace: (input, options) => request("POST", url("workspaces"), input, options),
     getWorkspace: (id, options) => request("GET", itemUrl("workspaces", id), undefined, options),

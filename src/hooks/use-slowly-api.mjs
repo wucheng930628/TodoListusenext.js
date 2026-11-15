@@ -13,7 +13,7 @@ function useResource(resource, { api = defaultApi, mode = "localStorage", worksp
     void controller.select({ mode, workspaceId, boardId, apiReady, allowWrites }).catch(() => {});
     return () => controller.cancel();
   }, [controller, mode, workspaceId, boardId, apiReady, allowWrites]);
-  const actions = useMemo(() => Object.fromEntries(["refresh", "cancel", "create", "update", "remove", "reorder"].map(name => [name, (...args) => {
+  const actions = useMemo(() => Object.fromEntries(["refresh", "cancel", "create", "update", "remove", "reorder", "recoverCreate", "resendCreate"].map(name => [name, (...args) => {
     if (controller.getSnapshot().scopeKey !== key) throw new SlowlyApiError("This callback belongs to an older resource scope.", { code: "STALE_SCOPE", outcome: "not-sent" });
     return controller[name](...args);
   }])), [controller, key]);
