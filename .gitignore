@@ -18,6 +18,8 @@
 /.phase4b2-test-runs/
 /.phase4c1-test-runs/
 /.phase4c2-test-runs/
+slowly-backup-*.json
+slowly-dry-run-*.json
 
 # next.js
 /.next/

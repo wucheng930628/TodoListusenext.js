@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import WorkspaceBoard from "./workspace-board";
 import { useMainWorkspace } from "../hooks/use-main-workspace.mjs";
 import { createMainUiSession } from "../lib/client/main-ui-session.mjs";
-import { captureWorkspaceBackup, exportBackupJson } from "../lib/client/workspace-backup.mjs";
+import { captureVerifiedBackup, downloadBackupArtifact } from "../lib/client/verified-backup.mjs";
 
 const defaults = { development: process.env.NODE_ENV === "development" };
 export default function MainUi({ options = defaults, isolationEntry = false }) {
@@ -12,12 +12,11 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
   const [confirmation, setConfirmation] = useState(""); const [message, setMessage] = useState("");
   useEffect(() => () => controller.cancel(), [controller]);
   const attempt = async fn => { setMessage(""); try { await fn(); } catch (error) { setMessage(error.message); } };
-  function backup() {
+  async function backup() {
     try {
-      const json = exportBackupJson(captureWorkspaceBackup());
-      const url = URL.createObjectURL(new Blob([json], { type: "application/json;charset=utf-8" }));
-      const link = document.createElement("a"); link.href = url; link.download = `slowly-backup-${Date.now()}.json`; link.click(); URL.revokeObjectURL(url);
-      setMessage("備份已匯出；原本的本機資料沒有變更。");
+      const artifact = await captureVerifiedBackup({ origin: window.location.origin });
+      downloadBackupArtifact(artifact);
+      setMessage(`備份已交由瀏覽器下載，請自行確認檔案。備份 Payload SHA-256：${artifact.integrity.fingerprint}`);
     } catch (error) { setMessage(error.message); }
   }
   return <>
