@@ -1,5 +1,6 @@
 import "server-only";
 import { DataError, assertId as assertModelId, fromFrontend, requireValue } from "../data-model.mjs";
+import { assertOperationKey } from "../crud-operation.mjs";
 
 const definitions = {
   workspaces: { type: "WORKSPACE", singular: "Workspace", fields: ["activeBoardId", "settings"] },
@@ -9,10 +10,11 @@ const definitions = {
 };
 const reserved = new Set(["__proto__", "constructor", "prototype", "entityType", "schemaVersion", "version", "createdAt", "updatedAt", "completedAt", "parentId", "workspaceId", "boardId", "gsi1pk", "gsi1sk", "taskCount", "widgetCount", "doingCount"]);
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Vary": "Origin" };
-const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501, MIGRATION_LOCKED: 409 };
+const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, OPERATION_CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501, MIGRATION_LOCKED: 409 };
 const messages = {
   VALIDATION: "Invalid request parameters or data.", NOT_FOUND: "Resource not found.", OWNERSHIP: "Resource does not belong to the specified parent.",
   CONFLICT: "Version conflict. Reload before retrying.", WIP_LIMIT: "WIP limit exceeded.", NOT_EMPTY: "Only empty boards may be deleted.",
+  OPERATION_CONFLICT: "Operation key is already bound to another payload or scope.",
   FORBIDDEN: "This API is restricted to explicitly enabled local development.",
   NOT_SUPPORTED: "Workspace enumeration is unsupported. Supply ?id= or use /api/workspaces/{id}.",
   MIGRATION_LOCKED: "This resource is protected by an active migration lock.",
@@ -94,7 +96,7 @@ function validatePatch(resource, data, creating) {
   if (data.settings !== undefined) object(data.settings);
   if (data.config !== undefined) keys(data.config, ["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
 }
-function dto(item) {
+export function dto(item) {
   return { id: item.id, version: item.version, position: item.position, createdAt: item.createdAt, updatedAt: item.updatedAt,
     ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: item.data };
 }
@@ -148,11 +150,18 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const data = fromFrontend(type, input.data); const order = position(input.position);
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
       if (["tasks", "widgets"].includes(resource)) { assertId(input.boardId, "BOARD"); if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE"); }
+      const operationKey = request.headers.get("idempotency-key");
+      if (operationKey !== null) assertOperationKey(operationKey);
       const repo = await getRepository(); let item;
+      if (operationKey !== null) {
+        const result = await repo.createOnce(resource, input, operationKey);
+        return Response.json({ data: dto(result.item) }, { status: result.replayed ? 200 : 201,
+          headers: { ...headers, "Idempotency-Status": result.replayed ? "replayed" : "created", "Operation-Id": operationKey } });
+      }
       if (resource === "workspaces") item = await repo.createWorkspace(data);
       else if (resource === "boards") item = await repo.createBoard(input.workspaceId, data, order);
       else { await scopedBoard(repo, input.boardId, input.workspaceId); item = await repo[`create${singular}`](input.boardId, data, order); }
-      return response(dto(item), 201);
+      return Response.json({ data: dto(item) }, { status: 201, headers: { ...headers, "Idempotency-Status": "unprotected" } });
     }),
     itemGet: wrap(async (request, context) => {
       const id = await idFrom(context); const q = query(request, scopeKeys);

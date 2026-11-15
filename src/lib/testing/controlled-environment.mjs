@@ -32,7 +32,14 @@ export async function controlledEnvironment() {
     return async (...args) => {
       const mainUi = process.env.SLOWLY_MAIN_UI_TEST === "1";
       requireValue(!["createWorkspace", "saveWorkspace", ...(!mainUi ? ["createBoard", "updateBoard", "deleteBoard", "reorderBoards"] : [])].includes(name), "Fixture structure is read-only", "FORBIDDEN");
-      if (["getWorkspace", "listBoards", "createBoard", "reorderBoards"].includes(name)) own(await target.getWorkspace(args[0]));
+      if (["createOnce", "getOperation"].includes(name)) {
+        const resource = name === "createOnce" ? args[0] : args[1].resource;
+        const scope = args[1];
+        requireValue(["tasks", "widgets", ...(mainUi ? ["boards"] : [])].includes(resource), "Unsupported controlled create scope", "FORBIDDEN");
+        if (name === "createOnce" && resource !== "boards") own(await target.getBoard(scope.boardId));
+        else own(await target.getWorkspace(scope.workspaceId));
+      }
+      else if (["getWorkspace", "listBoards", "createBoard", "reorderBoards"].includes(name)) own(await target.getWorkspace(args[0]));
       else if (["getBoard", "updateBoard", "deleteBoard", "listTasks", "listWidgets", "createTask", "updateTask", "deleteTask", "setTaskStatus", "createWidget", "updateWidget", "deleteWidget", "reorderTasks", "reorderWidgets"].includes(name)) own(await target.getBoard(args[0]));
       else if (name === "getTask") own(await target.getTask(args[0]));
       else if (name === "getWidget") own(await target.getWidget(args[0]));

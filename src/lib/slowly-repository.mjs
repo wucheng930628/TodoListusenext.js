@@ -1,6 +1,7 @@
 import "server-only";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { DataError, INDEX_NAME, assertId, assertItemSize, makeItem, requireValue, validateData } from "./data-model.mjs";
+import { DataError, INDEX_NAME, assertId, assertItemSize, fromFrontend, makeItem, requireValue, validateData } from "./data-model.mjs";
+import { assertOperationKey, createOperation, assertSameOperation, createReceipt, workspaceCreateScope } from "./crud-operation.mjs";
 
 // No SDK client is constructed here: tests inject an isolated document-client double.
 export function createRepository(db, { tableName = "SlowlyTasks", clock = () => new Date().toISOString() } = {}) {
@@ -50,6 +51,58 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     }
   }
   function revised(item, changes) { return { ...item, ...changes, version: item.version + 1, updatedAt: clock() }; }
+  async function readReceipt(key) {
+    assertOperationKey(key);
+    const result = await db.send(new GetCommand({ TableName: tableName, Key: { id: `SLOWLY#CRUD_OPERATION#${key}` }, ConsistentRead: true }));
+    return result.Item;
+  }
+  async function commitCreate(item, actions, operation) {
+    if (operation) {
+      item.id = operation.targetId;
+      if (item.parentId) item.gsi1sk = `${item.entityType}#${String(item.position).padStart(12, "0")}#${item.id}`;
+      actions.push(put(createReceipt(operation, item, clock())));
+    }
+    await commit(actions);
+    return item;
+  }
+  async function createOnce(resource, input, key) {
+    const operation = createOperation(resource, input, key);
+    const data = fromFrontend(operation.type, input.data);
+    const replay = receipt => {
+      assertSameOperation(receipt, operation);
+      return { item: structuredClone(receipt.result), replayed: receipt.attemptId !== operation.attemptId };
+    };
+    const previous = await readReceipt(key);
+    if (previous) return replay(previous);
+    try {
+      let item;
+      if (resource === "workspaces") item = await createWorkspace(data, operation);
+      else if (resource === "boards") item = await createBoard(input.workspaceId, data, input.position, operation);
+      else {
+        const board = await get("BOARD", input.boardId);
+        requireValue(input.workspaceId === undefined || input.workspaceId === board.workspaceId, "Workspace mismatch", "OWNERSHIP");
+        item = await childChange(operation.type, input.boardId, null, data, null, input.position, false, operation);
+      }
+      return { item, replayed: false };
+    } catch (cause) {
+      // Even a lost transaction response can have committed. Only a durable receipt proves success.
+      const confirmed = await readReceipt(key);
+      if (confirmed) return replay(confirmed);
+      throw cause;
+    }
+  }
+  async function getOperation(key, scope) {
+    assertOperationKey(key);
+    const receipt = await readReceipt(key);
+    if (!receipt) return null;
+    const workspaceCreate = scope.resource === "workspaces";
+    requireValue(receipt.entityType === "CRUD_OPERATION" && receipt.schemaVersion === 1 && receipt.state === "CONFIRMED" &&
+      receipt.resource === scope.resource && (workspaceCreate
+        ? scope.scope === workspaceCreateScope && receipt.parentScope === workspaceCreateScope
+        : receipt.workspaceId === scope.workspaceId && (scope.resource === "boards" || receipt.boardId === scope.boardId)),
+    "Operation scope does not match", "OPERATION_CONFLICT");
+    return receipt;
+  }
   async function list(type, parent) {
     await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parent);
     const items = []; let cursor;
@@ -59,20 +112,20 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     } while (cursor);
     return items.filter(item => item.entityType === type && item.parentId === parent).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
   }
-  async function createWorkspace(data) {
+  async function createWorkspace(data, operation) {
     const item = { ...makeItem("WORKSPACE", data, { now: clock() }), viewOrigin: "api", boardCount: 0 };
-    await commit([put(item)]); return item;
+    return commitCreate(item, [put(item)], operation);
   }
   async function saveWorkspace(id, data, version) {
     const previous = await get("WORKSPACE", id); expected(previous, version);
     const item = revised(previous, { data: validateData("WORKSPACE", data) });
     await commit([put(item, previous)]); return item;
   }
-  async function createBoard(workspaceId, data, position = 0) {
+  async function createBoard(workspaceId, data, position = 0, operation) {
     const parent = await get("WORKSPACE", workspaceId);
     requireValue(Number.isSafeInteger(parent.boardCount), "Workspace count metadata requires review");
     const item = { ...makeItem("BOARD", data, { parent: workspaceId, position, now: clock() }), widgetPresence: "absent" };
-    await commit([put(item), put(revised(parent, { boardCount: parent.boardCount + 1 }), parent)]); return item;
+    return commitCreate(item, [put(item), put(revised(parent, { boardCount: parent.boardCount + 1 }), parent)], operation);
   }
   async function updateBoard(id, data, version) {
     const previous = await get("BOARD", id); expected(previous, version);
@@ -89,7 +142,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount > 0, "Workspace count metadata requires review");
     await commit([remove(board), put(revised(parent, { boardCount: parent.boardCount - 1 }), parent)]);
   }
-  async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false) {
+  async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false, operation) {
     const board = await get("BOARD", boardId);
     const previous = id ? await get(type, id) : null;
     if (previous) { expected(previous, version); requireValue(previous.boardId === boardId && previous.workspaceId === board.workspaceId, "Entity belongs to a different board", "OWNERSHIP"); }
@@ -109,7 +162,9 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const doingCount = board.doingCount + (type === "TASK" ? Number(item?.data.status === "doing") - Number(previous?.data.status === "doing") : 0);
     requireValue(doingCount <= board.data.wipLimit && doingCount >= 0, "WIP limit exceeded", "WIP_LIMIT");
     const nextBoard = revised(board, { [countKey]: board[countKey] + (previous ? deleting ? -1 : 0 : 1), doingCount, ...(type === "WIDGET" ? { widgetPresence: "present" } : {}) });
-    await commit([deleting ? remove(previous) : put(item, previous), put(nextBoard, board)]);
+    const actions = [deleting ? remove(previous) : put(item, previous), put(nextBoard, board)];
+    if (operation) await commitCreate(item, actions, operation);
+    else await commit(actions);
     return item ?? null;
   }
   async function reorder(type, parentId, entries) {
@@ -126,6 +181,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return items.map(({ item }) => item);
   }
   return {
+    createOnce, getOperation,
     createWorkspace, getWorkspace: id => get("WORKSPACE", id), saveWorkspace,
     createBoard, getBoard: id => get("BOARD", id), updateBoard, deleteBoard,
     listBoards: id => list("BOARD", id), listTasks: id => list("TASK", id), listWidgets: id => list("WIDGET", id),
