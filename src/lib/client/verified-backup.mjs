@@ -47,15 +47,16 @@ export async function captureVerifiedBackup({ storage, origin, createdAt } = {})
   return sealBackup(backup, origin);
 }
 
-export async function verifyBackupArtifact(input) {
+// Structural parsing is shared with the synchronous server-side SHA-256 verifier.
+// Callers must verify the exact payload bytes before trusting the returned metadata.
+export function parseBackupArtifact(input) {
   let artifact;
   try { artifact = typeof input === "string" ? JSON.parse(input) : structuredClone(input); }
   catch { fail("INVALID_JSON", "備份檔不是有效 JSON。"); }
   if (artifact?.format !== "slowly-verified-backup" || artifact.formatVersion !== 1 || typeof artifact.payload !== "string" ||
     Object.keys(artifact).some(key => !["format", "formatVersion", "payload", "integrity"].includes(key))) fail("UNSUPPORTED_VERSION", "備份格式或版本不支援。");
   if (!artifact.integrity || Object.keys(artifact.integrity).some(key => !["algorithm", "fingerprint"].includes(key)) ||
-    artifact.integrity.algorithm !== "SHA-256" || !/^[a-f0-9]{64}$/.test(artifact.integrity.fingerprint || "") ||
-    await sha256(artifact.payload) !== artifact.integrity.fingerprint) fail("FINGERPRINT_MISMATCH", "備份 Fingerprint 不符，請停止使用此檔案。");
+    artifact.integrity.algorithm !== "SHA-256" || !/^[a-f0-9]{64}$/.test(artifact.integrity.fingerprint || "")) fail("FINGERPRINT_MISMATCH", "備份 Fingerprint 不符，請停止使用此檔案。");
   let payload;
   try { payload = JSON.parse(artifact.payload); } catch { fail("INVALID_JSON", "備份內容不是有效 JSON。"); }
   if (payload?.format !== "slowly-verified-backup-payload" || payload.formatVersion !== 1 ||
@@ -65,7 +66,14 @@ export async function verifyBackupArtifact(input) {
     JSON.stringify(payload.sourceSchemaVersions) !== JSON.stringify(backupSchemaVersions(backup))) fail("SOURCE_MISMATCH", "來源或版本資訊與備份不一致。");
   const roundTrip = validateBackup(exportBackupJson(backup));
   if (backup.sources.some((source, index) => roundTrip.sources[index].raw !== source.raw)) fail("ROUND_TRIP_FAILED", "原始 JSON 往返驗證失敗。");
-  return { backup, fingerprint: artifact.integrity.fingerprint, sourceInfo: payload.sourceInfo, sourceSchemaVersions: payload.sourceSchemaVersions };
+  return { backup, fingerprint: artifact.integrity.fingerprint, sourceInfo: payload.sourceInfo, sourceSchemaVersions: payload.sourceSchemaVersions, payload: artifact.payload };
+}
+
+export async function verifyBackupArtifact(input) {
+  const parsed = parseBackupArtifact(input);
+  if (await sha256(parsed.payload) !== parsed.fingerprint) fail("FINGERPRINT_MISMATCH", "備份 Fingerprint 不符，請停止使用此檔案。");
+  const { payload: _payload, ...verified } = parsed;
+  return verified;
 }
 
 export function downloadBackupArtifact(artifact) {

@@ -8,6 +8,8 @@ const operationKey = (id, op) => `SLOWLY#MIGRATION_OPERATION#${id}#${op}`;
 const manifestKey = (id, index) => `SLOWLY#MIGRATION_MANIFEST#${id}#${String(index).padStart(12, "0")}`;
 const validHash = value => requireValue(typeof value === "string" && /^[a-f0-9]{64}$/.test(value), "Invalid migration identifier");
 const header = op => ({ operationId: op.operationId, key: op.key, targetId: op.targetId, fingerprint: op.fingerprint });
+const bindingFields = plan => plan.sourceBinding ? { sourceBinding: plan.sourceBinding, sourceIdentity: plan.sourceIdentity } : {};
+const receiptBinding = plan => plan.sourceBinding ? { planId: plan.migrationId, sourceBindingHash: hash(plan.sourceBinding) } : {};
 
 export function createMigrationService(db, { tableName = "SlowlyTasks", clock = () => new Date().toISOString(), registrationBudget = 32 } = {}) {
   const store = migrationStore(db, tableName);
@@ -24,14 +26,37 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     requireValue(session.planFormatVersion === 2 && session.targetSchemaVersion === 1, "Unsupported session schema", "UNSUPPORTED_SCHEMA");
     requireValue([session.total, session.registeredCount, session.confirmedCount, session.rolledBackCount, session.releasedCount].every(value => Number.isSafeInteger(value) && value >= 0) && session.total >= 1 && session.registeredCount <= session.total && session.confirmedCount <= session.registeredCount && session.rolledBackCount <= session.confirmedCount && session.releasedCount <= session.confirmedCount, "Invalid session counters", "INTEGRITY_CONFLICT");
     requireValue(session.migrationId === id && ["PREPARING", "READY", "RUNNING", "VERIFYING", "VERIFIED", "RELEASING", "CONFLICT", "FAILED", "ROLLING_BACK", "ROLLBACK_CONFLICT", "ROLLED_BACK", "RELEASED"].includes(session.state) && ["HELD", "CLOSED", "RELEASING", "RELEASED"].includes(session.lockState), "Invalid session state", "INTEGRITY_CONFLICT");
+    if (session.sourceBinding || session.sourceIdentity || session.policies?.sourcePolicy) {
+      const identity = session.sourceIdentity;
+      requireValue(identity?.sourceBindingVersion === 1 && hash(identity) === id &&
+        hash(identity.policies) === hash(session.policies) && hash(identity.sourceBinding) === hash(session.sourceBinding) &&
+        hash(identity.sourceBinding.sourcePolicy) === hash(session.policies.sourcePolicy) &&
+        identity.sourceRevision === session.sourceRevision && identity.expectedWorkspaceHash === session.expectedWorkspaceHash &&
+        hash(identity.counts) === hash(session.counts) && identity.operations.length === session.total && identity.targets.length === session.total &&
+        session.sourceStorageKey === identity.sourceBinding.sourcePolicy.primary &&
+        session.sourceStorageVersion === identity.sourceBinding.sources.find(source => source.source === session.sourceStorageKey)?.storageVersion &&
+        session.sourceId === `SLOWLY#MIGRATION_SOURCE#${hash(identity.sourceNamespace)}`,
+      "Session source policy binding mismatch", "INTEGRITY_CONFLICT");
+      const expectedHeaders = identity.operations.map(([key, fingerprint], index) => ({ operationId: hash([id, key]), key, targetId: identity.targets[index], fingerprint }));
+      requireValue(hash(expectedHeaders) === session.manifestHash, "Source manifest binding mismatch", "INTEGRITY_CONFLICT");
+      const source = await getControl(session.sourceId, "MIGRATION_SOURCE");
+      requireValue(source.migrationId === id && source.sourceRevision === session.sourceRevision && source.sourceBindingHash === hash(session.sourceBinding), "Source policy ownership mismatch", "INTEGRITY_CONFLICT");
+    }
     return session;
   }
   async function getOperation(id, op) {
-    validHash(op); await getSession(id);
+    validHash(op); const session = await getSession(id);
     const receipt = await getControl(operationKey(id, op), "MIGRATION_OPERATION");
     requireValue(receipt.migrationId === id && receipt.operation.operationId === op && operationFingerprint(receipt.operation) === receipt.operation.fingerprint && hash([id, receipt.operation.key]) === op, "Operation integrity mismatch", "INTEGRITY_CONFLICT");
     const manifest = await getControl(manifestKey(id, receipt.index), "MIGRATION_MANIFEST");
     requireValue(manifest.migrationId === id && hash(manifest.header) === hash(header(receipt.operation)), "Manifest mismatch", "INTEGRITY_CONFLICT");
+    if (session.sourceBinding) {
+      const bindingHash = hash(session.sourceBinding);
+      requireValue(receipt.planId === id && manifest.planId === id && receipt.sourceBindingHash === bindingHash && manifest.sourceBindingHash === bindingHash &&
+        manifest.index === receipt.index && Number.isSafeInteger(receipt.index) && receipt.index >= 0 && receipt.index < session.total &&
+        hash(session.sourceIdentity.operations[receipt.index]) === hash([receipt.operation.key, receipt.operation.fingerprint]) &&
+        session.sourceIdentity.targets[receipt.index] === receipt.operation.targetId, "Operation source policy mismatch", "INTEGRITY_CONFLICT");
+    }
     return receipt;
   }
   async function allOperations(session) {
@@ -68,14 +93,14 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     let session = await store.get(sessionKey(id));
     if (!session) {
       const now = clock();
-      const source = control(sourceId, "MIGRATION_SOURCE", { migrationId: id, sourceRevision: plan.sourceRevision, sourceNamespaceHash: hash(plan.sourceNamespace) }, now);
+      const source = control(sourceId, "MIGRATION_SOURCE", { migrationId: id, sourceRevision: plan.sourceRevision, sourceNamespaceHash: hash(plan.sourceNamespace), ...receiptBinding(plan) }, now);
       session = control(sessionKey(id), "MIGRATION_SESSION", { migrationId: id, state: "PREPARING", planFormatVersion: 2, targetSchemaVersion: 1,
         sourceId, sourceRevision: plan.sourceRevision, sourceStorageKey: plan.sourceStorageKey, sourceStorageVersion: plan.sourceStorageVersion,
-        policies: plan.policies, expectedWorkspaceHash: plan.expectedWorkspaceHash, counts: plan.counts, manifestHash: hash(plan.operations.map(header)),
+        policies: plan.policies, ...bindingFields(plan), expectedWorkspaceHash: plan.expectedWorkspaceHash, counts: plan.counts, manifestHash: hash(plan.operations.map(header)),
         total: plan.operations.length, registeredCount: 0, confirmedCount: 0, rolledBackCount: 0, releasedCount: 0, lockState: "HELD" }, now);
       // Preflight every item before binding a source, not after partial writes.
       for (const [index, operation] of plan.operations.entries()) {
-        assertItemSize(control(operationKey(id, operation.operationId), "MIGRATION_OPERATION", { migrationId: id, index, state: "PENDING", operation }, now));
+        assertItemSize(control(operationKey(id, operation.operationId), "MIGRATION_OPERATION", { migrationId: id, index, state: "PENDING", operation, ...receiptBinding(plan) }, now));
         target(operation, session);
       }
       const existingSource = await store.get(sourceId);
@@ -88,8 +113,8 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     requireValue(source.migrationId === id && source.sourceRevision === plan.sourceRevision && session.sourceId === sourceId && session.manifestHash === hash(plan.operations.map(header)), "Session source mismatch", "SOURCE_CONFLICT");
     for (let attempt = 0; attempt < registrationBudget && session.state === "PREPARING" && session.registeredCount < session.total; attempt++) {
       const index = session.registeredCount; const operation = plan.operations[index];
-      const manifest = control(manifestKey(id, index), "MIGRATION_MANIFEST", { migrationId: id, index, header: header(operation) }, session.createdAt);
-      const receipt = control(operationKey(id, operation.operationId), "MIGRATION_OPERATION", { migrationId: id, index, state: "PENDING", operation }, session.createdAt);
+      const manifest = control(manifestKey(id, index), "MIGRATION_MANIFEST", { migrationId: id, index, header: header(operation), ...receiptBinding(plan) }, session.createdAt);
+      const receipt = control(operationKey(id, operation.operationId), "MIGRATION_OPERATION", { migrationId: id, index, state: "PENDING", operation, ...receiptBinding(plan) }, session.createdAt);
       try { await store.transact([store.put(manifest), store.put(receipt), store.put(revise(session, { registeredCount: index + 1 }), session)]); }
       catch (error) { if (error.code !== "CONFLICT") throw error; }
       session = await getSession(id);

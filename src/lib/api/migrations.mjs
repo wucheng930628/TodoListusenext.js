@@ -7,14 +7,16 @@ import { BackupError } from "../client/workspace-backup.mjs";
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", Vary: "Origin" };
 const statuses = { VALIDATION: 400, FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, PLAN_CONFLICT: 409, SOURCE_CONFLICT: 409,
   INTEGRITY_CONFLICT: 409, IDEMPOTENCY_KEY_REUSE: 409, SESSION_STATE: 409, DEPENDENCY_CONFLICT: 409, TARGET_CONFLICT: 409,
-  WIP_LIMIT: 409, ROLLBACK_CONFLICT: 409, RELEASE_BLOCKED: 409, VERIFICATION_STALE: 409, PREVIEW_INVALID: 422, UNSUPPORTED_SCHEMA: 422, PAYLOAD_TOO_LARGE: 413 };
+  WIP_LIMIT: 409, ROLLBACK_CONFLICT: 409, RELEASE_BLOCKED: 409, VERIFICATION_STALE: 409, PREVIEW_INVALID: 422, UNSUPPORTED_SCHEMA: 422,
+  MULTIPLE_SOURCES_REQUIRE_REVIEW: 422, SOURCE_POLICY_INVALID: 422, PAYLOAD_TOO_LARGE: 413 };
 const hashId = value => requireValue(typeof value === "string" && /^[a-f0-9]{64}$/.test(value), "Invalid migration identifier");
 const json = (data, status = 200) => Response.json({ data }, { status, headers });
 function sessionDto(session) {
   return { migrationId: session.migrationId, state: session.state, version: session.version, lockState: session.lockState,
     planFormatVersion: session.planFormatVersion, targetSchemaVersion: session.targetSchemaVersion, sourceRevision: session.sourceRevision,
     total: session.total, registeredCount: session.registeredCount, confirmedCount: session.confirmedCount, rolledBackCount: session.rolledBackCount, releasedCount: session.releasedCount,
-    counts: session.counts, createdAt: session.createdAt, updatedAt: session.updatedAt, ...(session.lastError ? { lastError: session.lastError } : {}) };
+    counts: session.counts, createdAt: session.createdAt, updatedAt: session.updatedAt,
+    ...(session.sourceBinding ? { sourceBinding: session.sourceBinding } : {}), ...(session.lastError ? { lastError: session.lastError } : {}) };
 }
 function operationDto(receipt) {
   return { migrationId: receipt.migrationId, operationId: receipt.operation.operationId, targetId: receipt.operation.targetId, type: receipt.operation.type,
@@ -44,7 +46,7 @@ export function createMigrationApi({ getService, configuration = () => process.e
   }
   function options(input) {
     requireValue(typeof input.sourceNamespace === "string", "Source namespace required");
-    if (input.policies !== undefined) keys(input.policies, ["legacyBoard", "widgets", "timer"]);
+    if (input.policies !== undefined) keys(input.policies, ["legacyBoard", "widgets", "timer", "sourcePolicy"]);
     return { sourceNamespace: input.sourceNamespace, policies: input.policies };
   }
   return {
@@ -52,6 +54,7 @@ export function createMigrationApi({ getService, configuration = () => process.e
       const input = await read(request, ["backup", "sourceNamespace", "policies"]);
       const plan = migrationPlanV2(input.backup, options(input));
       return json({ planId: plan.planId, migrationId: plan.migrationId, formatVersion: 2, counts: plan.counts, sourceRevision: plan.sourceRevision, issues: plan.issues,
+        ...(plan.sourceBinding ? { sourceBinding: plan.sourceBinding } : {}),
         operations: plan.operations.map(operation => ({ operationId: operation.operationId, type: operation.type, targetId: operation.targetId, fingerprint: operation.fingerprint, parentId: operation.parentId })) });
     }),
     create: wrap(async request => {

@@ -77,7 +77,6 @@ export async function prepareDryRun(artifact, options) {
   const selected = backup.sources.find(source => source.key === backup.selectedSourceKey);
   const report = { backupFingerprint: verified.fingerprint, sourceSchemaVersions: verified.sourceSchemaVersions,
     sourceCounts: { workspaces: 1, ...selected.summary }, planId: null, blockers: [] };
-  if (backup.sources.length !== 1) report.blockers.push({ code: "MULTIPLE_SOURCES_REQUIRE_REVIEW" });
   for (const source of backup.sources) if (hasDuplicateJsonKeys(source.raw)) report.blockers.push({ code: "DUPLICATE_JSON_KEYS" });
   const raw = readBackupSource(backup);
   const legacy = backup.selectedSourceKey === "slowly-board-v1";
@@ -86,14 +85,19 @@ export async function prepareDryRun(artifact, options) {
   if (workspace) inspectSource(workspace, report.blockers);
   let plan;
   try {
-    plan = migrationPlanV2(backup, options);
+    plan = migrationPlanV2(options?.policies?.sourcePolicy === undefined ? backup : artifact, options);
     report.planId = plan.planId; report.sourceCounts = plan.counts;
+    if (plan.sourceBinding) {
+      report.sourcePolicy = plan.sourceBinding.sourcePolicy;
+      report.originalCounts = plan.sourceBinding.originalCounts;
+      report.exclusionSummary = plan.sourceBinding.exclusionSummary;
+    }
     for (const issue of plan.issues) if (issue.severity === "error" || issue.severity === "blocker" || issue.code === "DANGLING_TIMER_TASK") report.blockers.push({ code: issue.code });
   } catch (error) {
     report.blockers.push({ code: error instanceof DataError ? error.code : "PREVIEW_INVALID" });
     if (Array.isArray(error.cause)) for (const issue of error.cause) if (issue.severity === "error") report.blockers.push({ code: issue.code });
   }
-  return { backup, plan, workspace, report, valid: report.blockers.length === 0 };
+  return { backup, ...(plan?.sourceBinding ? { artifact: structuredClone(artifact) } : {}), plan, workspace, report, valid: report.blockers.length === 0 };
 }
 
 export function assertDryRunTable(tableName, runId) {
@@ -123,7 +127,7 @@ export async function executeDryRun({ prepared, db, tableName, runId, ownerSecre
   let service = createMigrationService(bounded, { tableName, registrationBudget: 1 });
   let session;
   do {
-    session = await service.createSession(prepared.backup, { sourceNamespace: plan.sourceNamespace, policies: plan.policies }, plan.planId);
+    session = await service.createSession(prepared.artifact ?? prepared.backup, { sourceNamespace: plan.sourceNamespace, policies: plan.policies }, plan.planId);
     await checkpoint({ stage: "REGISTERING", registered: session.registeredCount, total: session.total });
   } while (session.state === "PREPARING");
   let recoveredResponses = 0;

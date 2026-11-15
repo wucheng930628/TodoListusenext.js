@@ -1,7 +1,8 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { DataError, requireValue, validateData, assertItemSize } from "../data-model.mjs";
-import { validateBackup, readBackupSource } from "../client/workspace-backup.mjs";
+import { readBackupSource } from "../client/workspace-backup.mjs";
+import { resolveMigrationSource } from "./source-policy.mjs";
 import { previewMigration } from "./preparation.mjs";
 
 export function canonical(value) {
@@ -16,9 +17,10 @@ export function migrationPlanV2(input, options = {}) {
   requireValue(typeof options.sourceNamespace === "string" && /^[a-zA-Z0-9._-]{8,128}$/.test(options.sourceNamespace), "Invalid source namespace");
   requireValue(options.policies === undefined || (options.policies && Object.getPrototypeOf(options.policies) === Object.prototype), "Invalid policies");
   const policies = { widgets: "preserve-implicit", timer: "preserve-absolute", ...options.policies };
-  requireValue(policies && Object.keys(policies).every(key => ["legacyBoard", "widgets", "timer"].includes(key)) && policies.widgets === "preserve-implicit" && policies.timer === "preserve-absolute", "Unsupported restoration policy");
+  requireValue(policies && Object.keys(policies).every(key => ["legacyBoard", "widgets", "timer", "sourcePolicy"].includes(key)) && policies.widgets === "preserve-implicit" && policies.timer === "preserve-absolute", "Unsupported restoration policy");
   if (policies.legacyBoard !== undefined && policies.legacyBoard !== null) requireValue(Object.getPrototypeOf(policies.legacyBoard) === Object.prototype && Object.keys(policies.legacyBoard).every(key => ["id", "name", "description", "wipLimit", "analyticsSize", "settings", "schemaVersion"].includes(key)), "Legacy board settings cannot supply children");
-  const backup = validateBackup(input);
+  const { backup, sourceBinding } = resolveMigrationSource(input, policies.sourcePolicy);
+  requireValue(!sourceBinding || policies.legacyBoard === undefined, "Excluded legacy sources cannot supply restoration settings", "SOURCE_POLICY_INVALID");
   const preview = previewMigration(backup, { sourceNamespace: options.sourceNamespace, legacyBoard: policies.legacyBoard });
   if (!preview.modelValid) throw new DataError("PREVIEW_INVALID", "Source schema, relationships or restoration settings are invalid", { cause: preview.issues });
   const raw = readBackupSource(backup);
@@ -39,11 +41,14 @@ export function migrationPlanV2(input, options = {}) {
     return operation;
   });
   const identity = { formatVersion: 2, schemaVersion: 1, sourceNamespace: options.sourceNamespace, sourceRevision: preview.sourceRevision, policies, operations: operations.map(operation => [operation.key, operation.fingerprint]) };
+  // Opt-in source binding revision: old single-source Plan v2 identities remain unchanged.
+  if (sourceBinding) Object.assign(identity, { sourceBindingVersion: 1, sourceBinding, expectedWorkspaceHash: hash(workspace), counts: preview.counts, targets: operations.map(operation => operation.targetId) });
   const migrationId = hash(identity);
   for (const operation of operations) operation.operationId = hash([migrationId, operation.key]);
   return { format: "slowly-migration-plan", formatVersion: 2, schemaVersion: 1, migrationId, planId: migrationId, sourceNamespace: options.sourceNamespace,
     sourceRevision: preview.sourceRevision, sourceStorageKey: backup.selectedSourceKey, sourceStorageVersion: backup.sources.find(source => source.key === backup.selectedSourceKey).storageVersion,
     expectedWorkspaceHash: hash(workspace), policies, counts: preview.counts, operations, executable: true,
+    ...(sourceBinding ? { sourceBinding, sourceIdentity: identity } : {}),
     issues: preview.issues.filter(issue => !["API_FIELD_UNSUPPORTED", "API_FRONTEND_ID_UNSUPPORTED"].includes(issue.code)) };
 }
 
