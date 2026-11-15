@@ -10,6 +10,8 @@ import { mainUiFixture } from "../tests/helpers/main-ui-fixture.mjs";
 import { workspaceFixture } from "../tests/phase4a-fixtures.mjs";
 import { hash } from "../src/lib/migration/plan-v2.mjs";
 import { runMainUiScenario } from "../tests/helpers/main-ui-scenario.mjs";
+import { runSafeCreateScenario, runSafeCreateTransactionRaces } from "../tests/helpers/safe-create-scenario.mjs";
+import { createRepository } from "../src/lib/slowly-repository.mjs";
 
 if (!process.argv.includes("--isolated-table")) throw new Error("Explicit --isolated-table required");
 process.env.DYNAMODB_ENDPOINT = "http://127.0.0.1:9000";
@@ -26,6 +28,10 @@ try {
   report.createAttempted = true; save();
   await client.send(new CreateTableCommand({ TableName: tableName, BillingMode: "PAY_PER_REQUEST", KeySchema: [{ AttributeName: "id", KeyType: "HASH" }], AttributeDefinitions: [{ AttributeName: "id", AttributeType: "S" }, { AttributeName: "gsi1pk", AttributeType: "S" }, { AttributeName: "gsi1sk", AttributeType: "S" }], GlobalSecondaryIndexes: [{ IndexName: "SlowlyByParent", KeySchema: [{ AttributeName: "gsi1pk", KeyType: "HASH" }, { AttributeName: "gsi1sk", KeyType: "RANGE" }], Projection: { ProjectionType: "ALL" } }] }));
   report.created = true; save(); await waitUntilTableExists({ client, maxWaitTime: 30 }, { TableName: tableName });
+  if (process.argv.includes("--safe-create")) {
+    await runSafeCreateScenario(createRepository(db, { tableName }), check);
+    await runSafeCreateTransactionRaces(db, tableName, check);
+  }
   const data = workspaceFixture(); data.settings = { controlledUiTestRun: runId }; data.extension = { untouched: true };
   data.boards[0].widgets[0].type = "analytics"; data.boards[0].widgets[1].config.extension = { retained: true };
   data.boards[0].tasks[0].subtasks[0].extension = { retained: true }; data.boards[0].tasks[0].extension = { retained: true };
@@ -47,7 +53,20 @@ try {
       let response;
       for (let i = 0; i < 120; i++) { try { response = await fetch(`${origin}/dev/main-api`, { signal: AbortSignal.timeout(20000) }); if (response.status === 200) break; } catch { /* Read startup probe only, never retries mutations. */ } await new Promise(resolve => setTimeout(resolve, 250)); }
       assert.equal(response?.status, 200); assert.match(await response.text(), /隔離測試入口尚未啟用 API/);
-      const view = await fetch(`${origin}/api/workspaces/${encodeURIComponent(g.workspaceId)}/view`); assert.equal(view.status, 200); assert.equal((await view.json()).data.readiness.eligible, true);
+      const view = await fetch(`${origin}/api/workspaces/${encodeURIComponent(g.workspaceId)}/view`); assert.equal(view.status, 200);
+      const snapshot = (await view.json()).data; assert.equal(snapshot.readiness.eligible, true);
+      if (process.argv.includes("--safe-create")) {
+        const key = randomUUID(); const boardId = snapshot.boards[0].board.id;
+        const input = { workspaceId: g.workspaceId, boardId, data: { id: "http-safe-create", title: "HTTP Safe Create", status: "todo" } };
+        const send = body => fetch(`${origin}/api/tasks`, { method: "POST", headers: { origin, "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) });
+        const created = await send(input); assert.equal(created.status, 201); const first = await created.json();
+        const replay = await send(input); assert.equal(replay.status, 200); assert.deepEqual(await replay.json(), first);
+        assert.equal((await send({ ...input, data: { ...input.data, title: "Conflict" } })).status, 409);
+        const params = new URLSearchParams({ resource: "tasks", workspaceId: g.workspaceId, boardId });
+        const receipt = await fetch(`${origin}/api/operations/${key}?${params}`); assert.equal(receipt.status, 200); assert.equal((await receipt.json()).data.state, "CONFIRMED");
+        params.set("workspaceId", foreign.id);
+        assert.equal((await fetch(`${origin}/api/operations/${key}?${params}`)).status, 403);
+      }
       const denied = await fetch(`${origin}/api/workspaces/${encodeURIComponent(foreign.id)}/view`); assert.equal(denied.status, 403);
       const homepage = await fetch(`${origin}/`); assert.match(await homepage.text(), /我的看板/);
     });

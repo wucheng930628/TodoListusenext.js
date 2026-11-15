@@ -26,6 +26,56 @@ test("homepage SSR defaults to the original local board and does not read storag
   finally { if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor); else delete globalThis.localStorage; }
 });
 
+test("StrictMode TaskPanel double-submit creates once and useAsyncDraft recovers a lost response", async () => {
+  const f = await mainUiFixture(); await f.activate(); f.grant(); f.failNextWrite("after");
+  const host = await hookHost(); let tree; let calls = 0;
+  const task = { id: "strict-safe", title: "Strict once", status: "todo", priority: "一般", tag: "個人", urgent: false, date: "", time: "", description: "", subtasks: [], notes: "" };
+  function Probe() {
+    tree = TaskPanel({ task, columns: [{ id: "todo", name: "待處理" }], asyncMode: true, onChange() {}, onClose() {},
+      onSave: async () => { calls++; await f.controller.saveTask(task); } });
+    tree.props.ref.current = { showModal() {}, close() {} };
+    return null;
+  }
+  function Strict() { return createElement(StrictMode, null, createElement(Probe)); }
+  try {
+    await host.render(Strict); assert.equal(f.calls.filter(call => call.method === "POST").length, 0);
+    await host.act(async () => {
+      const form = element(tree, node => node.type === "form");
+      const first = form.props.onSubmit({ preventDefault() {} });
+      const second = form.props.onSubmit({ preventDefault() {} });
+      await Promise.all([first, second]);
+    });
+    assert.equal(calls, 1); assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+    assert.equal(f.controller.getSnapshot().uncertainWrite, false);
+    assert.equal(f.controller.getSnapshot().projection.workspace.boards[0].tasks.filter(item => item.id === task.id).length, 1);
+  } finally { await host.close(); }
+});
+
+test("MainUi explicit UNKNOWN resend changes the board mount key after confirmation", async () => {
+  const f = await mainUiFixture(); const host = await hookHost(); let tree;
+  const options = { api: f.api, development: true };
+  function Probe() { tree = MainUi({ options, isolationEntry: true }); return null; }
+  const input = name => element(tree, node => node.type === "input" && node.props["aria-label"] === name);
+  const board = () => element(tree, node => node.type === WorkspaceBoard);
+  try {
+    await host.render(Probe);
+    await host.act(() => input("API Workspace ID").props.onChange({ target: { value: f.workspaceId } }));
+    await host.act(() => element(tree, node => node.type === "input" && node.props.type === "checkbox").props.onChange({ target: { checked: true } }));
+    await host.act(() => elements(tree, node => node.type === "form")[0].props.onSubmit({ preventDefault() {} })); await flush(host);
+    await host.act(() => input("授權寫入 Workspace ID").props.onChange({ target: { value: f.workspaceId } }));
+    await host.act(() => elements(tree, node => node.type === "form")[1].props.onSubmit({ preventDefault() {} }));
+    const originalKey = board().key;
+    f.failNextWrite("before");
+    await host.act(async () => { await assert.rejects(board().props.apiSession.saveTask({ title: "Unsure form", status: "todo" })); });
+    assert.equal(board().key, originalKey); assert.equal(board().props.apiSession.writable, false);
+    globalThis.window.confirm = () => true;
+    await host.act(() => element(tree, node => node.type === "button" && node.props.children === "以原 Key 與原內容重送").props.onClick()); await flush(host);
+    assert.notEqual(board().key, originalKey); assert.equal(board().props.apiSession.writable, false);
+    assert.equal(board().props.apiSession.workspace.boards[0].tasks.filter(task => task.title === "Unsure form").length, 1);
+    const posts = f.calls.filter(call => call.method === "POST"); assert.equal(posts.length, 2); assert.equal(posts[0].operationKey, posts[1].operationKey);
+  } finally { await host.close(); }
+});
+
 test("real MainUi source controls activate only on user events; StrictMode writes zero and explicit disable works", async () => {
   const f = await mainUiFixture(); const host = await hookHost(); let tree;
   const options = { api: f.api, development: true };

@@ -73,11 +73,11 @@ export async function runMainUiScenario(f, secondWorkspaceId, check) {
       assert.equal(session().workspace.boards.find(board => board.id === boardId).tasks[0].title, task.title);
       await host.act(() => session().refresh()); assert.equal(session().workspace.boards.find(board => board.id === boardId).tasks[0].title, "external");
     });
-    await check("lost POST response issues once, retains API mode and stops later writes", async () => {
+    await check("lost POST response issues once and recovers through its persistent receipt", async () => {
       f.failNextWrite("after"); const before = f.calls.filter(call => call.method === "POST").length;
-      await host.act(async () => { await assert.rejects(session().saveTask({ id: "uncertain-ui-post", title: "Once only", status: "todo" }), { code: "NETWORK_ERROR" }); });
+      await host.act(() => session().saveTask({ id: "uncertain-ui-post", title: "Once only", status: "todo" }));
       assert.equal(f.calls.filter(call => call.method === "POST").length, before + 1); assert.equal(session().writable, false);
-      assert.ok(walk(tree).some(node => node.props?.role === "alert" && typeof node.props.children === "string" && node.props.children.includes("寫入結果尚未確認")));
+      assert.equal(session().workspace.boards.find(board => board.id === session().workspace.activeBoardId).tasks.filter(task => task.id === "uncertain-ui-post").length, 1);
       await host.act(() => find(node => node.type === "button" && node.props.children === "切回 localStorage Mode").props.onClick());
       assert.equal(walk(tree).some(node => node.type === WorkspaceBoard), false);
     });

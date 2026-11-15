@@ -55,7 +55,7 @@ test("adapter → actual handlers → actual repository contract with isolated i
   assert.deepEqual([...db.items.values()], [legacy]);
 });
 
-test("lost POST response is ambiguous; adapter sends once and current API cannot deduplicate a manual repeat", async () => {
+test("legacy no-key lost POST response is ambiguous and a manual repeat remains unprotected", async () => {
   const { db, fetchImpl, calls } = fixture();
   const api = createSlowlyApi({ fetchImpl: async (...args) => { await fetchImpl(...args); throw new TypeError("response lost after commit"); } });
   const input = { data: { settings: { testRun: randomUUID() } } };

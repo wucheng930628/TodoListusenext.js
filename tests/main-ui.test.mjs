@@ -90,9 +90,9 @@ test("409 does not adopt a stale draft after refresh, and read failure never act
   assert.equal(f.controller.getSnapshot().mode, "api");
 });
 
-for (const failure of ["before", "after"]) test(`${failure}-commit network loss freezes writes and cannot be bypassed by source toggle`, async () => {
+test("before-commit network loss stays UNKNOWN and cannot be bypassed by source toggle", async () => {
   const f = await mainUiFixture(); await f.activate(); f.grant(); const count = f.calls.filter(call => call.method === "POST").length;
-  f.failNextWrite(failure);
+  f.failNextWrite("before");
   await assert.rejects(f.controller.saveTask({ id: "ambiguous", title: "Once", status: "todo" }), { code: "NETWORK_ERROR" });
   assert.equal(f.calls.filter(call => call.method === "POST").length, count + 1); assert.equal(f.controller.getSnapshot().uncertainWrite, true);
   f.controller.deactivate(); await f.activate(); assert.throws(() => f.grant(), { code: "WRITES_DISABLED" });
