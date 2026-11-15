@@ -28,7 +28,7 @@ function privatePath(input, existing = false) {
 
 function argumentsFrom(argv) {
   const booleans = new Set(["--synthetic", "--resume", "--cleanup", "--confirm-dry-run", "--preview-only", "--exercise-response-loss"]);
-  const values = new Set(["--backup", "--confirm-backup", "--state", "--confirm-cleanup", "--stop-after", "--legacy-board"]);
+  const values = new Set(["--backup", "--confirm-backup", "--state", "--confirm-cleanup", "--stop-after", "--legacy-board", "--source-policy"]);
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const name = argv[i];
@@ -42,7 +42,7 @@ function argumentsFrom(argv) {
 async function main() {
   const args = argumentsFrom(process.argv.slice(2));
   const synthetic = args["--synthetic"] === true;
-  requireValue(!synthetic || (!args["--backup"] && !args["--confirm-backup"] && !args["--legacy-board"]), "Synthetic and real backup inputs cannot be mixed");
+  requireValue(!synthetic || (!args["--backup"] && !args["--confirm-backup"] && !args["--legacy-board"] && !args["--source-policy"]), "Synthetic and real backup inputs cannot be mixed");
   requireValue(synthetic || args["--cleanup"] || (args["--backup"] && /^[a-f0-9]{64}$/.test(args["--confirm-backup"] || "")), "An explicitly selected backup and fingerprint are required", "BACKUP_CONFIRMATION_REQUIRED");
   requireValue(synthetic || args["--cleanup"] || args["--preview-only"] || args["--confirm-dry-run"], "Dry-run write confirmation required", "DRY_RUN_CONFIRMATION_REQUIRED");
   requireValue(synthetic || (!args["--stop-after"] && !args["--exercise-response-loss"]), "Fault injection is synthetic-only");
@@ -104,6 +104,7 @@ async function main() {
       }
       let policies;
       if (args["--legacy-board"]) policies = { legacyBoard: JSON.parse(readFileSync(privatePath(args["--legacy-board"], true), "utf8")) };
+      if (args["--source-policy"]) policies = { ...policies, sourcePolicy: JSON.parse(readFileSync(privatePath(args["--source-policy"], true), "utf8")) };
       prepared = await prepareDryRun(artifact, { sourceNamespace: `dryrun-${state.runId}`, ...(policies ? { policies } : {}) });
       requireValue(synthetic || prepared.report.backupFingerprint === args["--confirm-backup"], "Fingerprint confirmation does not match", "BACKUP_CONFIRMATION_REQUIRED");
       if (resuming) requireValue(state.backupFingerprint === prepared.report.backupFingerprint && state.planId === prepared.report.planId, "Source changed since the interrupted run", "STATE_CONFLICT");
