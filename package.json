@@ -25,7 +25,11 @@
     "test:main-ui": "node --import ./tests/helpers/server-only-loader.mjs --test tests/main-ui.test.mjs",
     "test:main-ui:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/main-ui-react.test.mjs",
     "test:db:main-ui": "node --import ./tests/helpers/ui-module-loader.mjs scripts/phase4c2-integration.mjs",
-    "test:safe-create": "node --import ./tests/helpers/server-only-loader.mjs --test tests/safe-create.test.mjs"
+    "test:safe-create": "node --import ./tests/helpers/server-only-loader.mjs --test tests/safe-create.test.mjs",
+    "migration:dry-run": "node --conditions=react-server scripts/migration-dry-run.mjs",
+    "test:dry-run": "node --import ./tests/helpers/server-only-loader.mjs --test tests/dry-run.test.mjs",
+    "test:backup:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/backup-tool-react.test.mjs",
+    "test:db:dry-run": "node --test tests/dry-run-db.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
