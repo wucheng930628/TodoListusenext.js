@@ -95,13 +95,14 @@ test("before-commit network loss stays UNKNOWN and cannot be bypassed by source 
   f.failNextWrite("before");
   await assert.rejects(f.controller.saveTask({ id: "ambiguous", title: "Once", status: "todo" }), { code: "NETWORK_ERROR" });
   assert.equal(f.calls.filter(call => call.method === "POST").length, count + 1); assert.equal(f.controller.getSnapshot().uncertainWrite, true);
-  f.controller.deactivate(); await f.activate(); assert.throws(() => f.grant(), { code: "WRITES_DISABLED" });
+  assert.throws(() => f.controller.deactivate(), { code: "RECOVERY_REQUIRED" });
+  await f.activate(); assert.throws(() => f.grant(), { code: "WRITES_DISABLED" });
 });
 
 test("cancelled read and stale Board callbacks cannot overwrite or mutate another scope", async () => {
   const f = await mainUiFixture(); let resolve; let signal;
-  const controller = createMainWorkspaceController({ api: f.api, development: true, readView: (id, options) => { signal = options.signal; return new Promise(done => { resolve = done; }); } });
-  const pending = controller.activate({ workspaceId: f.workspaceId, apiReady: true }); controller.deactivate(); assert.equal(signal.aborted, true);
+  const controller = createMainWorkspaceController({ api: f.api, journal: f.journal, development: true, readView: (id, options) => { signal = options.signal; return new Promise(done => { resolve = done; }); } });
+  const pending = controller.activate({ workspaceId: f.workspaceId, apiReady: true }); await new Promise(setImmediate); controller.cancel(); assert.equal(signal.aborted, true);
   resolve(await f.api.getWorkspaceView(f.workspaceId)); await pending; assert.equal(controller.getSnapshot().projection, null);
   await f.activate(); f.grant(); const old = createMainUiSession({ ...f.controller.getSnapshot(), controller: f.controller });
   f.controller.selectBoard("board-b"); assert.throws(() => old.selectBoard("board-a"), { code: "STALE_SCOPE" });
@@ -122,7 +123,7 @@ test("unknown field edits block rather than discard data, and compound Widget ch
 
 test("rapid Board switch ignores a late whole-workspace response and keeps current selection", async () => {
   const f = await mainUiFixture(); let resolve; let deferred = false; let signal;
-  const c = createMainWorkspaceController({ api: f.api, development: true, readView: (id, options) => deferred ? new Promise(done => { resolve = done; signal = options.signal; }) : f.api.getWorkspaceView(id, options) });
+  const c = createMainWorkspaceController({ api: f.api, journal: f.journal, development: true, readView: (id, options) => deferred ? new Promise(done => { resolve = done; signal = options.signal; }) : f.api.getWorkspaceView(id, options) });
   await c.activate({ workspaceId: f.workspaceId, apiReady: true }); deferred = true;
   const pending = c.refresh(); c.selectBoard("board-b"); assert.equal(signal.aborted, true);
   const stale = await f.api.getWorkspaceView(f.workspaceId); stale.boards[0].tasks[0].data.title = "late old response";
@@ -132,8 +133,8 @@ test("rapid Board switch ignores a late whole-workspace response and keeps curre
 test("cancel does not cancel a committed POST; late completion cannot unlock or auto-retry", async () => {
   const f = await mainUiFixture(); let resolve; let input; let signal;
   const api = { ...f.api, createTask: (body, options) => { input = body; signal = options.signal; return new Promise(done => { resolve = done; }); } };
-  const c = createMainWorkspaceController({ api, development: true }); await c.activate({ workspaceId: f.workspaceId, apiReady: true }); c.authorizeWrites(f.workspaceId);
-  const pending = c.saveTask({ id: "late-create", title: "Late", status: "todo" }); c.cancel(); assert.equal(signal.aborted, true);
+  const c = createMainWorkspaceController({ api, journal: f.journal, development: true }); await c.activate({ workspaceId: f.workspaceId, apiReady: true }); c.authorizeWrites(f.workspaceId);
+  const pending = c.saveTask({ id: "late-create", title: "Late", status: "todo" }); await new Promise(setImmediate); c.cancel(); assert.equal(signal.aborted, true);
   resolve(await f.api.createTask(input)); await pending;
   assert.equal(c.getSnapshot().uncertainWrite, true); assert.equal(c.getSnapshot().allowWrites, false);
   await c.refresh(); assert.equal(c.getSnapshot().projection.workspace.boards[0].tasks.some(task => task.id === "late-create"), true);
@@ -153,14 +154,16 @@ test("missing legacy metadata blocks readiness, malformed requests are 400 and i
   assert.equal(response.status, 500); assert.doesNotMatch(await response.text(), /private-sdk-details/);
 });
 
-test("note draft cache survives source/Board changes without mixing scopes, DTOs or storage", async () => {
+test("note draft blocks source/Board changes until explicitly resolved without changing DTOs", async () => {
   const f = await mainUiFixture(); await f.activate();
   const first = createMainUiSession({ ...f.controller.getSnapshot(), controller: f.controller });
-  first.noteDraftStore.write("widget-a", { text: "unsaved A", version: first.widgetVersions["widget-a"] });
-  f.controller.selectBoard("board-b");
-  const second = createMainUiSession({ ...f.controller.getSnapshot(), controller: f.controller }); assert.equal(second.noteDraftStore.read("widget-a"), null);
-  second.noteDraftStore.write("widget-a", { text: "unsaved B", version: 2 });
-  f.controller.deactivate(); await f.activate();
-  const restored = createMainUiSession({ ...f.controller.getSnapshot(), controller: f.controller }); assert.equal(restored.noteDraftStore.read("widget-a").text, "unsaved A");
-  assert.notEqual(restored.workspace.boards[0].widgets[0].config.text, "unsaved A"); assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
+  const value = { text: "unsaved A", version: first.widgetVersions["widget-a"] };
+  first.noteDraftStore.write("widget-a", value);
+  assert.throws(() => f.controller.selectBoard("board-b"), { code: "UNSAVED_DRAFTS" });
+  assert.throws(() => f.controller.deactivate(), { code: "UNSAVED_DRAFTS" });
+  assert.equal(first.noteDraftStore.read("widget-a").text, "unsaved A");
+  assert.notEqual(first.workspace.boards[0].widgets[0].config.text, "unsaved A");
+  first.noteDraftStore.clear("widget-a", value); f.controller.selectBoard("board-b");
+  assert.equal(f.controller.getSnapshot().activeBoardId, "board-b");
+  assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });

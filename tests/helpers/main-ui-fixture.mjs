@@ -5,6 +5,7 @@ import { createWorkspaceViewApi } from "../../src/lib/api/workspace-view.mjs";
 import { createSlowlyApi } from "../../src/lib/client/slowly-api.mjs";
 import { createMainWorkspaceController } from "../../src/lib/client/main-workspace-controller.mjs";
 import { createOperationApi } from "../../src/lib/api/operations.mjs";
+import { createMemoryRecoveryJournal } from "../../src/lib/client/recovery-journal.mjs";
 
 export async function mainUiFixture(options = {}) {
   const f = releaseFixture({ ...options, data: options.data || workspaceFixture() }); await f.apply(); await f.finish();
@@ -23,8 +24,9 @@ export async function mainUiFixture(options = {}) {
     if (failure === "after" && init.method !== "GET") { failure = null; throw new TypeError("response lost"); }
     return response;
   };
-  const api = createSlowlyApi({ fetchImpl }); const controller = createMainWorkspaceController({ api, development: true }); const workspaceId = f.plan.operations[0].targetId;
-  return { ...f, api, controller, workspaceId, fetchImpl, calls, failNextWrite(mode = "before") { failure = mode; },
+  const journal = createMemoryRecoveryJournal();
+  const api = createSlowlyApi({ fetchImpl }); const controller = createMainWorkspaceController({ api, development: true, journal }); const workspaceId = f.plan.operations[0].targetId;
+  return { ...f, api, controller, journal, workspaceId, fetchImpl, calls, failNextWrite(mode = "before") { failure = mode; },
     async activate() { await controller.activate({ workspaceId, apiReady: true }); },
     grant() { controller.authorizeWrites(workspaceId); },
   };

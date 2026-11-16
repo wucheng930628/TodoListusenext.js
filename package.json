@@ -30,7 +30,9 @@
     "test:dry-run": "node --import ./tests/helpers/server-only-loader.mjs --test tests/dry-run.test.mjs",
     "test:backup:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/backup-tool-react.test.mjs",
     "test:db:dry-run": "node --test tests/dry-run-db.test.mjs",
-    "test:source-exclusion": "node --conditions=react-server --test tests/source-exclusion.test.mjs"
+    "test:source-exclusion": "node --conditions=react-server --test tests/source-exclusion.test.mjs",
+    "test:cutover-safety": "node --import ./tests/helpers/server-only-loader.mjs --test tests/cutover-safety.test.mjs",
+    "test:cutover-safety:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/cutover-safety-react.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",

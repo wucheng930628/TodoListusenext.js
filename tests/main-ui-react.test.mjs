@@ -53,7 +53,7 @@ test("StrictMode TaskPanel double-submit creates once and useAsyncDraft recovers
 
 test("MainUi explicit UNKNOWN resend changes the board mount key after confirmation", async () => {
   const f = await mainUiFixture(); const host = await hookHost(); let tree;
-  const options = { api: f.api, development: true };
+  const options = { api: f.api, journal: f.journal, development: true };
   function Probe() { tree = MainUi({ options, isolationEntry: true }); return null; }
   const input = name => element(tree, node => node.type === "input" && node.props["aria-label"] === name);
   const board = () => element(tree, node => node.type === WorkspaceBoard);
@@ -78,7 +78,7 @@ test("MainUi explicit UNKNOWN resend changes the board mount key after confirmat
 
 test("real MainUi source controls activate only on user events; StrictMode writes zero and explicit disable works", async () => {
   const f = await mainUiFixture(); const host = await hookHost(); let tree;
-  const options = { api: f.api, development: true };
+  const options = { api: f.api, journal: f.journal, development: true };
   function Probe() { tree = MainUi({ options, isolationEntry: true }); return null; }
   function Strict() { return createElement(StrictMode, null, createElement(Probe)); }
   try {

@@ -64,7 +64,7 @@ test("NOT_FOUND remains UNKNOWN; explicit resend keeps original key/payload acro
   await assert.rejects(f.controller.saveTask({ id: "retry", title: "Original", status: "todo" }));
   const state = f.controller.getSnapshot(); assert.equal(state.uncertainWrite, true); assert.equal(state.createRecovery.receiptState, "NOT_FOUND");
   await assert.rejects(f.controller.saveTask({ id: "other", title: "Unsafe", status: "todo" }), { code: "WRITES_DISABLED" });
-  f.controller.deactivate(); await f.activate(); assert.throws(() => f.grant(), { code: "WRITES_DISABLED" });
+  assert.throws(() => f.controller.deactivate(), { code: "RECOVERY_REQUIRED" }); await f.activate(); assert.throws(() => f.grant(), { code: "WRITES_DISABLED" });
   await f.controller.resendCreate(f.workspaceId);
   const posts = f.calls.filter(call => call.method === "POST"); assert.equal(posts.length, 2); assert.equal(posts[0].body, posts[1].body); assert.equal(posts[0].operationKey, posts[1].operationKey);
   assert.equal(f.controller.getSnapshot().uncertainWrite, false); assert.equal(f.controller.getSnapshot().allowWrites, false);
@@ -115,7 +115,7 @@ test("UNKNOWN lookup failure stays frozen and recovery never restores a deleted 
     }
     return receipt;
   } };
-  const c = createMainWorkspaceController({ api, development: true }); await c.activate({ workspaceId: f.workspaceId, apiReady: true }); c.authorizeWrites(f.workspaceId);
+  const c = createMainWorkspaceController({ api, journal: f.journal, development: true }); await c.activate({ workspaceId: f.workspaceId, apiReady: true }); c.authorizeWrites(f.workspaceId);
   f.failNextWrite("after"); await assert.rejects(c.saveTask({ id: "removed-after-create", title: "Once", status: "todo" }));
   assert.equal(c.getSnapshot().uncertainWrite, true);
   unavailable = false; await c.recoverCreate();
