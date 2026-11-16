@@ -24,6 +24,7 @@ export function createSafeCreateIntent(api, resource, input, { operationKey = cr
   }
   return {
     operationKey, resource, scope: structuredClone(scope),
+    exportIntent: () => ({ operationKey, resource, input: structuredClone(original) }),
     send,
     async lookup(options) {
       const result = await api.getOperation(operationKey, scope, { timeoutMs: 30000, ...options });

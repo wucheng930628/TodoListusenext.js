@@ -96,7 +96,7 @@ export function WidgetContent({ widget, tasks, now, onEdit, onConfigure, asyncMo
     case "today":
     case "upcoming": return <TaskListWidget widget={widget} tasks={tasks} now={now} onEdit={onEdit} />;
     case "timer": return <TimerWidget widget={widget} tasks={tasks} now={now} onConfigure={onConfigure} readOnly={readOnly} />;
-    case "note": return asyncMode ? <AsyncWidgetNote widget={widget} version={version} readOnly={readOnly} onConfigure={onConfigure} draftStore={noteDraftStore} /> : <textarea className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="輸入筆記…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
+    case "note": return asyncMode ? <AsyncWidgetNote widget={widget} version={version} readOnly={readOnly} onConfigure={onConfigure} draftStore={noteDraftStore} /> : <textarea readOnly={readOnly} className="widget-note" aria-label="快速筆記內容" maxLength={10000} placeholder="輸入筆記…" value={widget.config.text || ""} onChange={event => onConfigure({ text: event.target.value })} />;
     default: return null;
   }
 }

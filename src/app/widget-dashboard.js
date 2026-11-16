@@ -82,15 +82,15 @@ function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemov
       }}>⠿</button>
       <h3><span>{entry.icon}</span>{entry.name}</h3>
       <div className="widget-controls">
-        <button disabled={asyncMode && !ready} aria-label={`將${entry.name}往前移`} title="往前移" onClick={() => onMove(-1)}>‹</button>
-        <button disabled={asyncMode && !ready} aria-label={`將${entry.name}往後移`} title="往後移" onClick={() => onMove(1)}>›</button>
+        <button disabled={!ready} aria-label={`將${entry.name}往前移`} title="往前移" onClick={() => onMove(-1)}>‹</button>
+        <button disabled={!ready} aria-label={`將${entry.name}往後移`} title="往後移" onClick={() => onMove(1)}>›</button>
         {configurable && <button aria-label={`${entry.name}設定`} title="小組件設定" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}>⚙</button>}
-        <button disabled={asyncMode && !ready} aria-label={`移除${entry.name}`} title="移除小組件" onClick={onRemove}>×</button>
+        <button disabled={!ready} aria-label={`移除${entry.name}`} title="移除小組件" onClick={onRemove}>×</button>
       </div>
     </header>
-    {settingsOpen && <div className="widget-settings"><WidgetSettings widget={widget} onConfigure={configure} readOnly={asyncMode && !ready} /></div>}
-    <div className="widget-body"><WidgetContent widget={widget} tasks={tasks} now={now} onEdit={onEdit} onConfigure={configure} asyncMode={asyncMode} version={version} readOnly={asyncMode && !ready} noteDraftStore={noteDraftStore} /></div>
-    <button className="widget-resize" disabled={asyncMode && !ready} aria-label={`調整${entry.name}大小，可拖曳或使用方向鍵`} title="拖曳調整大小，或使用方向鍵" onPointerDown={event => {
+    {settingsOpen && <div className="widget-settings"><WidgetSettings widget={widget} onConfigure={configure} readOnly={!ready} /></div>}
+    <div className="widget-body"><WidgetContent widget={widget} tasks={tasks} now={now} onEdit={onEdit} onConfigure={configure} asyncMode={asyncMode} version={version} readOnly={!ready} noteDraftStore={noteDraftStore} /></div>
+    <button className="widget-resize" disabled={!ready} aria-label={`調整${entry.name}大小，可拖曳或使用方向鍵`} title="拖曳調整大小，或使用方向鍵" onPointerDown={event => {
       if (event.button !== 0) return;
       drag.current = { x: event.clientX, y: event.clientY, span: fitted.span, height: frame.current.getBoundingClientRect().height, version };
       event.currentTarget.setPointerCapture(event.pointerId);
