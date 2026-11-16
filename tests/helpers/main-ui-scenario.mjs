@@ -7,7 +7,7 @@ import { hookHost } from "./react-hook-host.mjs";
 
 const walk = node => !node || typeof node !== "object" ? [] : Array.isArray(node) ? node.flatMap(walk) : [node, ...walk(node.props?.children)];
 export async function runMainUiScenario(f, secondWorkspaceId, check) {
-  const host = await hookHost(); let tree; const options = { api: f.api, development: true };
+  const host = await hookHost(); let tree; const options = { api: f.api, journal: f.journal, development: true };
   const initialCalls = f.calls.length; const initialWrites = f.calls.filter(call => call.method !== "GET").length;
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new Error("Main API UI touched storage"); } });
@@ -50,7 +50,7 @@ export async function runMainUiScenario(f, secondWorkspaceId, check) {
       assert.match(renderToStaticMarkup(createElement(WorkspaceBoard, { apiSession: session() })), /API 暫不支援原子清空/);
     });
     await check("Board create/update/reorder and absent → present → empty widgets via explicit actions", async () => {
-      await host.act(() => session().saveBoard({ name: "UI board", description: "new", wipLimit: 2 })); await grant(f.workspaceId);
+      await host.act(async () => { const created = await session().saveBoard({ name: "UI board", description: "new", wipLimit: 2 }); session().selectBoard(created.data.id); }); await grant(f.workspaceId);
       const board = session().workspace.boards.find(item => item.id === session().workspace.activeBoardId); assert.equal(Object.hasOwn(board, "widgets"), false);
       await host.act(() => session().saveBoard({ ...board, name: "Updated UI board" }, { expectedVersion: session().boardVersion(board.id) }));
       await host.act(() => session().saveWidget({ id: "first-ui-widget", type: "note", span: 6, height: 200, config: { text: "first" } }));

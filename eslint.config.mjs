@@ -10,6 +10,7 @@ const eslintConfig = defineConfig([
     ".next-phase3-api/**",
     ".next-controlled-ui/**",
     ".next-main-ui/**",
+    ".next-browser-*/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

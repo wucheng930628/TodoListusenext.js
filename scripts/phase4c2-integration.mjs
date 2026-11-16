@@ -46,8 +46,10 @@ try {
   const foreign = await f.repository.createWorkspace({ settings: { controlledUiTestRun: "another-isolated-run" } }); report.foreignWorkspaceId = foreign.id; save();
   await db.send(new PutCommand({ TableName: tableName, Item: { id: `CONTROLLED_UI_ENV#${runId}`, entityType: "CONTROLLED_UI_TEST", runId, workspaceIds: report.workspaceIds, boardWidgetPresence: {} }, ConditionExpression: "attribute_not_exists(id)" }));
   if (process.argv.includes("--http-smoke") || process.argv.includes("--serve")) {
-    const origin = "http://127.0.0.1:3114";
-    child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", "3114"], { env: { ...process.env, NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_LOCAL_API_ORIGIN: origin, SLOWLY_MAIN_UI_TEST: "1", SLOWLY_CONTROLLED_UI_RUN_ID: runId, SLOWLY_CONTROLLED_UI_TABLE: tableName }, stdio: "inherit", windowsHide: true });
+    const originArg = process.argv.indexOf("--origin");
+    const origin = (originArg >= 0 ? process.argv[originArg + 1] : process.env.SLOWLY_BROWSER_ACCEPTANCE_ORIGIN) || "http://127.0.0.1:3114";
+    const url = new URL(origin); assert.ok(url.protocol === "http:" && url.hostname === "127.0.0.1" && url.origin === origin && Number(url.port) >= 1024 && url.port !== "3000");
+    child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", url.port], { env: { ...process.env, NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_LOCAL_API_ORIGIN: origin, SLOWLY_MAIN_UI_TEST: "1", SLOWLY_CONTROLLED_UI_RUN_ID: runId, SLOWLY_CONTROLLED_UI_TABLE: tableName, SLOWLY_BROWSER_ACCEPTANCE_RUN_ID: process.argv.includes("--browser-acceptance") ? runId : "" }, stdio: "inherit", windowsHide: true });
     report.serverPid = child.pid; report.serverStopped = false; save();
     await check("Actual Next routes and main UI remain isolated over HTTP", async () => {
       let response;
@@ -72,7 +74,7 @@ try {
     });
     if (process.argv.includes("--serve")) {
       report.stopFile = `.phase4c2-test-runs/${runId}.stop`; save();
-      console.log(`OPEN ${origin}/dev/main-api\nTEST_WORKSPACE ${g.workspaceId}\nSTOP_FILE ${report.stopFile}`);
+      console.log(`OPEN ${origin}/${process.argv.includes("--browser-acceptance") ? "dev/browser-acceptance" : "dev/main-api"}\nTEST_WORKSPACE ${g.workspaceId}\nSTOP_FILE ${report.stopFile}`);
       let stopRequested = false; const stop = () => { stopRequested = true; }; process.once("SIGINT", stop); process.once("SIGTERM", stop);
       try { for (let i = 0; i < 1800 && !stopRequested && !existsSync(report.stopFile) && child.exitCode === null; i++) await new Promise(resolve => setTimeout(resolve, 500)); }
       finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
