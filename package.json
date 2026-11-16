@@ -32,7 +32,9 @@
     "test:db:dry-run": "node --test tests/dry-run-db.test.mjs",
     "test:source-exclusion": "node --conditions=react-server --test tests/source-exclusion.test.mjs",
     "test:cutover-safety": "node --import ./tests/helpers/server-only-loader.mjs --test tests/cutover-safety.test.mjs",
-    "test:cutover-safety:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/cutover-safety-react.test.mjs"
+    "test:cutover-safety:react": "node --import ./tests/helpers/ui-module-loader.mjs --test tests/cutover-safety-react.test.mjs",
+    "test:trusted-evidence": "node --import ./tests/helpers/server-only-loader.mjs --test tests/trusted-evidence.test.mjs",
+    "test:db:trusted-evidence": "node --import ./tests/helpers/server-only-loader.mjs scripts/phase4d2c-evidence-integration.mjs --isolated-table"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1168.0",
