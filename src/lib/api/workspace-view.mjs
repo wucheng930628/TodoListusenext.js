@@ -58,13 +58,23 @@ export async function readWorkspaceView(repository, workspaceId, { migrationServ
   return snapshot;
 }
 
-export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false }) {
+export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false, authorizeWorkspace, cutoverReadiness }) {
   return async (request, context) => {
     try {
       guard(request, configuration()); query(request, []); const { id } = await context.params;
-      requireValue(isolation() === true, "Main API UI requires an explicitly isolated test environment", "FORBIDDEN");
       assertApiId(id, "WORKSPACE");
-      return Response.json({ data: await readWorkspaceView(await getRepository(), id, { migrationService: getMigrationService ? await getMigrationService() : undefined }) }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
+      const binding = isolation() === true ? null : authorizeWorkspace?.(id);
+      requireValue(isolation() === true || binding?.workspaceId === id, "Workspace view is not authorized", "FORBIDDEN");
+      const snapshot = await readWorkspaceView(await getRepository(), id, { migrationService: getMigrationService ? await getMigrationService() : undefined });
+      if (binding) {
+        requireValue(snapshot.readiness.migration?.migrationId === binding.migrationId && snapshot.readiness.migration.state === "RELEASED" && snapshot.readiness.migration.lockState === "RELEASED", "Approved migration is not released", "MIGRATION_NOT_READY");
+        // Staging reads are allowed for readiness probes; formal UI writes remain separately gated.
+        const gate = cutoverReadiness ? await cutoverReadiness(binding, snapshot) : null;
+        const enabled = gate?.ready === true && gate.cutoverEnabled === true && gate.migrationId === binding.migrationId && gate.workspaceId === id &&
+          gate.sessionVersion === snapshot.readiness.migration.version && Number.isFinite(gate.expiresAt) && gate.expiresAt > Date.now();
+        Object.assign(snapshot.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: enabled, formalCutoverExpiresAt: enabled ? gate.expiresAt : null });
+      }
+      return Response.json({ data: snapshot }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     } catch (error) {
       const statuses = { VALIDATION: 400, OWNERSHIP: 403, FORBIDDEN: 403, NOT_FOUND: 404, SNAPSHOT_NOT_READY: 409, MIGRATION_NOT_READY: 409, INTEGRITY_CONFLICT: 409 };
       const code = error instanceof DataError && statuses[error.code] ? error.code : "INTERNAL";

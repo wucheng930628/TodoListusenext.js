@@ -1,10 +1,11 @@
 import "server-only";
 import { migrationPlanV2, hash } from "./plan-v2.mjs";
 import { projectWorkspaceForUi } from "../client/workspace-projection.mjs";
+import { projectMainView } from "../client/main-view-model.mjs";
 
 // Server/CLI-only preflight. Probes are supplied by the trusted test runner, never an HTTP request.
 // It neither executes migration/release nor enables the homepage.
-export async function checkCutoverReadiness({ backup, options, migrationId, service, repository, readItem, probes = {} }) {
+export async function checkCutoverReadiness({ backup, options, migrationId, service, repository, readItem, probes = {}, authorization = null, now = () => Date.now() }) {
   const checks = []; const add = async (name, fn) => {
     try { const result = await fn(); if (result !== true) throw new Error("Evidence incomplete"); checks.push({ name, passed: true }); }
     catch (error) { checks.push({ name, passed: false, code: error.code || "CHECK_FAILED" }); }
@@ -31,10 +32,32 @@ export async function checkCutoverReadiness({ backup, options, migrationId, serv
     for (const board of boards) actual.push(...(await repository.listTasks(board.id)).map(item => item.id), ...(await repository.listWidgets(board.id)).map(item => item.id));
     return hash(actual.sort()) === hash(receipts.map(receipt => receipt.operation.targetId).sort());
   });
-  // This phase deliberately has no formal homepage cutover or authority to enable it.
+  // Legacy callers retain the meaning of technical prerequisites; formal checks below are mandatory.
   const prerequisitesPassed = checks.every(check => check.passed);
-  return { checkedAt: new Date().toISOString(), migrationId, prerequisitesPassed, ready: false, cutoverEnabled: false,
-    blockers: [...checks.filter(check => !check.passed).map(check => check.name), "FORMAL_UI_CUTOVER_NOT_IMPLEMENTED"], checks,
+  await add("boundDryRunEvidence", async () => {
+    if (!plan?.sourceBinding || typeof probes.isolatedDryRun !== "function") return false;
+    const report = await probes.isolatedDryRun(); const run = report?.migration || report;
+    return report?.cleaned === true && run?.dryRunPassed === true && run.verifyPassed === true && run.releasePassed === true &&
+      run.planId === plan.planId && run.backupFingerprint === plan.sourceBinding.backupFingerprint && run.sourceWorkspaceHash === plan.expectedWorkspaceHash && run.targetWorkspaceHash === plan.expectedWorkspaceHash &&
+      run.mappingHash === hash(plan.operations.map(operation => [operation.key, operation.targetId, operation.parentId, operation.position])) &&
+      hash(run.exclusionSummary) === hash(plan.sourceBinding.exclusionSummary) && Array.isArray(run.differences) && run.differences.length === 0;
+  });
+  await add("formalWorkspaceView", async () => {
+    if (!plan || typeof probes.formalWorkspaceView !== "function") return false;
+    const snapshot = await probes.formalWorkspaceView(); const root = plan.operations[0].targetId;
+    return snapshot?.workspace?.id === root && snapshot.readiness?.eligible === true && snapshot.readiness.migration?.migrationId === migrationId &&
+      snapshot.readiness.migration.state === "RELEASED" && hash(projectMainView(snapshot, root).workspace) === plan.expectedWorkspaceHash;
+  });
+  for (const name of ["sourceFrozen", "draftSafety", "pendingWriteSafety", "unknownRecovery", "reloadRecovery", "legacyProtection"]) {
+    await add(name, async () => typeof probes[name] === "function" && await probes[name]());
+  }
+  await add("explicitCutoverAuthorization", async () => authorization?.enabled === true && authorization.workspaceId === plan?.operations[0]?.targetId &&
+    authorization.migrationId === migrationId && authorization.backupFingerprint === plan?.sourceBinding?.backupFingerprint &&
+    Number.isSafeInteger(authorization.expiresAt) && authorization.expiresAt > now() && authorization.expiresAt <= now() + 86400000);
+  const ready = checks.every(check => check.passed);
+  return { checkedAt: new Date(now()).toISOString(), migrationId, prerequisitesPassed, ready, cutoverEnabled: ready,
+    workspaceId: plan?.operations[0]?.targetId ?? null, expiresAt: ready ? Math.min(authorization.expiresAt, now() + 30000) : null,
+    blockers: checks.filter(check => !check.passed).map(check => check.name), checks,
     scope: "specified migration/workspace only", sourceRevision: plan?.sourceRevision ?? null, sessionVersion: session?.version ?? null };
 }
 export function assertCutoverReady(report) {
