@@ -1,8 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHmac, randomBytes } from "node:crypto";
 import { evidenceFixture } from "./helpers/evidence-fixture.mjs";
 import { formalCutoverEvidence } from "../src/lib/api/formal-evidence.mjs";
-import { hash } from "../src/lib/migration/plan-v2.mjs";
+import { canonical, hash } from "../src/lib/migration/plan-v2.mjs";
+import { prepareSignedReleaseEvidence } from "../src/lib/migration/release-evidence.mjs";
+import { createTrustedEvidenceProvider, verifyEvidenceSignature } from "../src/lib/migration/trusted-evidence.mjs";
+
+test("server-generated release preparation verifies without authorizing cutover and rejects scope, expiry and live changes", async () => {
+  const f = await evidenceFixture();
+  const binding = { ...f.binding, sourceNamespace: f.plan.sourceNamespace };
+  const key = randomBytes(32);
+  const readItem = async id => f.db.items.get(id);
+  let now = f.bundle.issuedAt;
+  const initial = hash([...f.db.items]);
+  const options = { backup: f.bundle.backup, options: f.bundle.options, binding, backupFingerprint: f.bundle.subject.backupFingerprint,
+    tableName: f.tableName, key, expiresInMs: 60000, service: f.service, repository: f.repository, readItem, now: () => now };
+  const signed = await prepareSignedReleaseEvidence(options);
+  let input = signed;
+  const provider = createTrustedEvidenceProvider({ ...options, endpoint: f.bundle.endpoint, loadBundle: async () => input,
+    verifySignature: (payload, signature) => verifyEvidenceSignature(payload, signature, key) });
+  const result = await provider(binding);
+  assert.equal(result.evidenceVerified, true);
+  assert.equal(result.ready, false);
+  assert.equal(result.cutoverEnabled, false);
+  assert.deepEqual(result.blockers, ["CUTOVER_APPROVAL_REQUIRED"]);
+  assert.equal(hash([...f.db.items]), initial);
+
+  for (const changed of [{ workspaceId: "different" }, { migrationId: "0".repeat(64) }, { sourceNamespace: "different-source" }]) {
+    assert.equal((await provider({ ...binding, ...changed })).evidenceVerified, undefined);
+  }
+  const tampered = structuredClone(signed);
+  tampered.payload.release.sessionVersion++;
+  input = tampered;
+  assert.deepEqual((await provider(binding)).blockers, ["EVIDENCE_SIGNATURE_REQUIRED"]);
+  input = signed;
+  now = signed.payload.expiresAt;
+  assert.deepEqual((await provider(binding)).blockers, ["EVIDENCE_EXPIRED_OR_SCOPE"]);
+  now = signed.payload.issuedAt;
+  const session = f.db.items.get(`SLOWLY#MIGRATION_SESSION#${f.plan.planId}`);
+  session.state = "RELEASING";
+  assert.equal((await provider(binding)).evidenceVerified, undefined);
+  await assert.rejects(prepareSignedReleaseEvidence(options), { code: "MIGRATION_NOT_READY" });
+  session.state = "RELEASED";
+  session.version++;
+  assert.deepEqual((await provider(binding)).blockers, ["LIVE_RELEASE_EVIDENCE_CONFLICT"]);
+
+  const refreshed = await prepareSignedReleaseEvidence(options);
+  const subject = refreshed.payload.subject;
+  const attestations = Object.fromEntries(Object.entries(f.bundle.attestations).map(([kind, value]) => [kind, { ...value, subject }]));
+  const payload = { ...refreshed.payload, purpose: "cutover", attestations };
+  input = { payload, signature: createHmac("sha256", key).update(canonical(payload)).digest("hex") };
+  assert.equal((await provider(binding)).ready, true);
+});
 
 test("signed synthetic evidence is verified against live server data without writes", async () => {
   const f = await evidenceFixture(); const before = hash([...f.db.items]); const snapshot = await f.snapshot();

@@ -4,11 +4,11 @@ import { canonical, hash } from "./plan-v2.mjs";
 import { prepareDryRun } from "./dry-run.mjs";
 import { checkCutoverReadiness } from "./cutover-readiness.mjs";
 import { readWorkspaceView } from "../api/workspace-view.mjs";
+import { readReleaseEvidence, viewFingerprint } from "./release-evidence.mjs";
 
 export const browserChecks = Object.freeze(["indexedDbPending", "unknownReload", "confirmedRefresh", "draftProtection", "pendingSwitch", "conflict409", "legacyProtection", "sourceIsolation"]);
 const deny = code => { throw Object.assign(new Error("Trusted cutover evidence is unavailable or inconsistent."), { code }); };
 const subjectMatches = (a, b) => a && hash(a) === hash(b);
-const viewFingerprint = snapshot => hash([snapshot.workspace, snapshot.boards, snapshot.readiness.migration]);
 
 // Only the server owns this key. Neither signatures nor browser assertions replace live DB checks.
 export function verifyEvidenceSignature(payload, signature, key) {
@@ -27,13 +27,24 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
       const signed = await loadBundle(binding);
       if (!signed || !(await verifySignature(signed.payload, signed.signature))) return blocked("EVIDENCE_SIGNATURE_REQUIRED");
       const bundle = signed.payload;
-      if (bundle?.formatVersion !== 1 || bundle.tableName !== tableName || bundle.endpoint !== endpoint || bundle.issuedAt > now() ||
+      if (![1, 2].includes(bundle?.formatVersion) || (binding.sourceNamespace && bundle.formatVersion !== 2) ||
+        bundle.tableName !== tableName || bundle.endpoint !== endpoint || bundle.issuedAt > now() ||
         !Number.isSafeInteger(bundle.issuedAt) || !Number.isSafeInteger(bundle.expiresAt) || bundle.expiresAt <= now() || bundle.expiresAt > bundle.issuedAt + 86400000) return blocked("EVIDENCE_EXPIRED_OR_SCOPE");
       const subject = bundle.subject;
       if (!subject || subject.workspaceId !== binding.workspaceId || subject.migrationId !== binding.migrationId || subject.planId !== binding.migrationId || !/^[a-f0-9]{64}$/.test(subject.backupFingerprint || "")) return blocked("EVIDENCE_SUBJECT_CONFLICT");
       const prepared = await prepareDryRun(bundle.backup, bundle.options);
       const plan = prepared.plan;
       if (!prepared.valid || plan?.planId !== subject.planId || plan.operations[0].targetId !== subject.workspaceId || prepared.report.backupFingerprint !== subject.backupFingerprint) return blocked("EVIDENCE_PLAN_CONFLICT");
+      if (bundle.formatVersion === 2) {
+        if (binding.sourceNamespace !== plan.sourceNamespace || subject.sourceNamespace !== binding.sourceNamespace) return blocked("EVIDENCE_SUBJECT_CONFLICT");
+        const release = await readReleaseEvidence({ binding, plan, repository, service, readItem });
+        if (!bundle.release || hash(bundle.release) !== hash(release) ||
+          (presentedSnapshot && (!presentedSnapshot.readiness?.eligible || viewFingerprint(presentedSnapshot) !== release.viewHash))) return blocked("LIVE_RELEASE_EVIDENCE_CONFLICT");
+        if (now() >= bundle.expiresAt) return blocked("EVIDENCE_EXPIRED_DURING_CHECK");
+        if (bundle.purpose === "release-preparation") return { ...blocked("CUTOVER_APPROVAL_REQUIRED"), evidenceVerified: true,
+          sessionVersion: release.sessionVersion, backupFingerprint: subject.backupFingerprint, evidenceExpiresAt: bundle.expiresAt };
+        if (bundle.purpose !== "cutover") return blocked("EVIDENCE_PURPOSE_CONFLICT");
+      }
       const attestations = bundle.attestations;
       if (!attestations || Object.keys(attestations).sort().join(",") !== "approval,browser,dryRun,freeze,validation") return blocked("ATTESTATION_SCHEMA_CONFLICT");
       const validate = (kind, provenance) => {
@@ -56,10 +67,11 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
       if (dryRun.report?.cleaned !== true || run?.planId !== subject.planId || run.backupFingerprint !== subject.backupFingerprint) return blocked("DRY_RUN_EVIDENCE_CONFLICT");
 
       const before = await service.getSession(subject.migrationId);
-      if (before.sourceBinding?.backupFingerprint !== subject.backupFingerprint || hash(before.sourceBinding?.sourcePolicy) !== hash(plan.policies.sourcePolicy) ||
+      if ((bundle.formatVersion === 2 && before.version !== bundle.release.sessionVersion) ||
+        before.sourceBinding?.backupFingerprint !== subject.backupFingerprint || hash(before.sourceBinding?.sourcePolicy) !== hash(plan.policies.sourcePolicy) ||
         before.manifestHash !== hash(plan.operations.map(op => ({ operationId: op.operationId, key: op.key, targetId: op.targetId, fingerprint: op.fingerprint })))) return blocked("LIVE_SESSION_BINDING_CONFLICT");
       const currentView = await readWorkspaceView(repository, subject.workspaceId, { migrationService: service });
-      if (!currentView.readiness.eligible || (presentedSnapshot &&
+      if (!currentView.readiness.eligible || (bundle.formatVersion === 2 && viewFingerprint(currentView) !== bundle.release.viewHash) || (presentedSnapshot &&
         (!presentedSnapshot.readiness.eligible || viewFingerprint(presentedSnapshot) !== viewFingerprint(currentView)))) return blocked("VIEW_CHANGED_OR_INCOMPLETE");
       const probes = {
         dynamodbLocal: async () => endpoint === "http://127.0.0.1:9000",

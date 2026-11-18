@@ -2,6 +2,7 @@ import "server-only";
 import { DataError, requireValue, assertId, validateData } from "../data-model.mjs";
 import { guard, query, assertApiId } from "./handlers.mjs";
 import { projectMainView } from "../client/main-view-model.mjs";
+import { assertReleaseBinding } from "./formal-workspace.mjs";
 
 function dto(item) { return { id: item.id, version: item.version, position: item.position, createdAt: item.createdAt, updatedAt: item.updatedAt, ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: structuredClone(item.data) }; }
 
@@ -65,9 +66,18 @@ export function createWorkspaceViewApi({ getRepository, getMigrationService, con
       assertApiId(id, "WORKSPACE");
       const binding = isolation() === true ? null : authorizeWorkspace?.(id);
       requireValue(isolation() === true || binding?.workspaceId === id, "Workspace view is not authorized", "FORBIDDEN");
-      const snapshot = await readWorkspaceView(await getRepository(), id, { migrationService: getMigrationService ? await getMigrationService() : undefined });
+      const migrationService = getMigrationService ? await getMigrationService() : undefined;
+      let boundSession;
+      if (binding?.sourceNamespace) {
+        requireValue(migrationService, "Missing migration authority", "MIGRATION_NOT_READY");
+        try { boundSession = await migrationService.getSession(binding.migrationId); }
+        catch (error) { if (error.code === "NOT_FOUND") throw new DataError("MIGRATION_NOT_READY", "Bound migration is unavailable"); throw error; }
+        assertReleaseBinding(binding, boundSession);
+      }
+      const snapshot = await readWorkspaceView(await getRepository(), id, { migrationService });
       if (binding) {
         requireValue(snapshot.readiness.migration?.migrationId === binding.migrationId && snapshot.readiness.migration.state === "RELEASED" && snapshot.readiness.migration.lockState === "RELEASED", "Approved migration is not released", "MIGRATION_NOT_READY");
+        if (boundSession) requireValue(snapshot.readiness.migration.version === boundSession.version, "Bound migration changed", "MIGRATION_NOT_READY");
         // Staging reads are allowed for readiness probes; formal UI writes remain separately gated.
         const gate = cutoverReadiness ? await cutoverReadiness(binding, snapshot) : null;
         const enabled = gate?.ready === true && gate.cutoverEnabled === true && gate.migrationId === binding.migrationId && gate.workspaceId === id &&

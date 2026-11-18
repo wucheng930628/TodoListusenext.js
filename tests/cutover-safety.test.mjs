@@ -8,6 +8,7 @@ import { createMainWorkspaceController } from "../src/lib/client/main-workspace-
 import { createRecoveryJournal, createMemoryRecoveryJournal } from "../src/lib/client/recovery-journal.mjs";
 import { readLocalPrimary } from "../src/lib/client/local-primary.mjs";
 import { formalWorkspaceBinding } from "../src/lib/api/formal-workspace.mjs";
+import { evidenceFixture } from "./helpers/evidence-fixture.mjs";
 import { createWorkspaceViewApi, readWorkspaceView } from "../src/lib/api/workspace-view.mjs";
 import { checkCutoverReadiness } from "../src/lib/migration/cutover-readiness.mjs";
 import { captureWorkspaceBackup } from "../src/lib/client/workspace-backup.mjs";
@@ -51,15 +52,19 @@ test("Formal runtime view is readable but does not grant UI writes without the C
 });
 
 test("formal View requires exact server-owned Workspace/Plan binding before data access", async () => {
-  const f = await mainUiFixture(); let access = 0;
-  const env = { NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_FORMAL_VIEW_ENABLED: "1", SLOWLY_FORMAL_VIEW_WORKSPACE: f.workspaceId, SLOWLY_FORMAL_VIEW_PLAN: f.plan.planId };
+  const f = await evidenceFixture(); let access = 0;
+  const workspaceId = f.binding.workspaceId;
+  const env = { NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_FORMAL_VIEW_ENABLED: "1", SLOWLY_FORMAL_VIEW_WORKSPACE: workspaceId,
+    SLOWLY_FORMAL_VIEW_PLAN: f.plan.planId, SLOWLY_FORMAL_VIEW_SOURCE_NAMESPACE: f.plan.sourceNamespace };
   const handler = config => createWorkspaceViewApi({ configuration: () => config, authorizeWorkspace: id => formalWorkspaceBinding(id, config),
     getRepository: async () => { access++; return f.repository; }, getMigrationService: async () => f.service });
-  const call = (config, id = f.workspaceId) => handler(config)(new Request(`http://127.0.0.1:3000/api/workspaces/${encodeURIComponent(id)}/view`, { headers: { host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000" } }), { params: Promise.resolve({ id }) });
+  const call = (config, id = workspaceId) => handler(config)(new Request(`http://127.0.0.1:3000/api/workspaces/${encodeURIComponent(id)}/view`, { headers: { host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000" } }), { params: Promise.resolve({ id }) });
   for (const config of [{ ...env, SLOWLY_FORMAL_VIEW_ENABLED: "0" }, { ...env, NODE_ENV: "production" }, { ...env, DYNAMODB_ENDPOINT: "https://dynamodb.amazonaws.com" }, { ...env, SLOWLY_MAIN_UI_TEST: "1" }]) assert.equal((await call(config)).status, 403);
   assert.equal((await call(env, `SLOWLY#WORKSPACE#${randomUUID()}`)).status, 403); assert.equal(access, 0);
-  const result = await call(env); assert.equal(result.status, 200); assert.equal((await result.json()).data.boards.length, 2);
+  assert.equal((await call({ ...env, SLOWLY_FORMAL_VIEW_SOURCE_NAMESPACE: "other-source" })).status, 409); assert.equal(access, 0);
   assert.equal((await call({ ...env, SLOWLY_FORMAL_VIEW_PLAN: "0".repeat(64) })).status, 409);
+  assert.equal(access, 0);
+  const result = await call(env); assert.equal(result.status, 200); assert.equal((await result.json()).data.boards.length, 2);
 });
 
 test("Reload restores frozen create key/payload and NOT_FOUND never permits a new create", async () => {
