@@ -84,6 +84,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     if (!createIntent || pending || state.createRecovery?.checking || state.createRecovery?.state === "CONFLICT" || confirmation !== state.workspaceId || state.mode !== "api" || state.workspaceId !== createIntent.scope.workspaceId) throw error("RECOVERY_REQUIRED", "請確認原 Workspace 與新增操作。");
     const receipt = await recoverCreate();
     if (!receipt || receipt.state === "CONFIRMED") return receipt;
+    if (!formalWritesAllowed()) throw error("CUTOVER_REQUIRED", "正式 Cutover Gate 尚未授權或已過期，保持唯讀。");
     const intent = createIntent;
     pending = true;
     publish({ mutation: "loading" });

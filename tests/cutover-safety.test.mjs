@@ -154,6 +154,34 @@ test("Expired formal Cutover authority cannot grant or dispatch another UI write
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 
+test("Formal recovery can look up a receipt but cannot resend with expired Cutover authority", async () => {
+  const f = await mainUiFixture();
+  let expiresAt = Date.now() + 60000;
+  const api = { ...f.api, getWorkspaceView: async (...args) => {
+    const view = await f.api.getWorkspaceView(...args);
+    Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: true, formalCutoverExpiresAt: expiresAt });
+    return view;
+  } };
+  const c = controllerFor(f, api);
+  await activate(c, f);
+  c.authorizeWrites(f.workspaceId);
+  f.failNextWrite("before");
+  await assert.rejects(c.saveTask({ id: "blocked-resend", title: "Keep original intent", status: "todo" }));
+  const journal = await f.journal.load();
+  assert.ok(journal);
+  const requestCount = f.calls.length;
+
+  expiresAt = 1;
+  const reloaded = controllerFor(f, api);
+  await activate(reloaded, f);
+  await assert.rejects(reloaded.resendCreate(f.workspaceId), { code: "CUTOVER_REQUIRED" });
+  const recoveryCalls = f.calls.slice(requestCount);
+  assert.ok(recoveryCalls.some(call => call.method === "GET" && call.path.includes("/api/operations/")));
+  assert.ok(recoveryCalls.every(call => call.method === "GET"));
+  assert.deepEqual(await f.journal.load(), journal);
+  assert.equal(reloaded.getSnapshot().uncertainWrite, true);
+});
+
 test("Pending write blocks all scope switches; cancellation persists UNKNOWN for Reload", async () => {
   const f = await mainUiFixture(); let finish; let invoked;
   const api = { ...f.api, createTask: (input, options) => new Promise(resolve => { invoked = { input, options }; finish = resolve; }) };
