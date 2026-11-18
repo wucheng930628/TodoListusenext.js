@@ -112,8 +112,11 @@ export default function BrowserAcceptance({ runId, workspaceIds }) {
       await type(note, "Browser unsaved widget draft");
       await activate(workspaceIds[0]); demand(elements().querySelector("textarea.widget-note")?.value === "Browser unsaved widget draft", "WIDGET_DRAFT_LOST");
       pass("draftProtection");
-      note.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-      await until(() => ![...elements().querySelectorAll(".widget-body small")].some(node => node.textContent === "未儲存草稿"));
+      await click(button("檢視未儲存草稿"));
+      const draftButtons = [...elements().querySelectorAll("button")].filter(node => node.textContent === "明確捨棄此草稿");
+      demand(draftButtons.length > 0, "DRAFT_REVIEW_EMPTY");
+      for (const discard of draftButtons) await click(discard);
+      demand(elements().textContent.includes("沒有未儲存草稿"), "DRAFT_DISCARD_NOT_CONFIRMED");
       await click(button("切回 localStorage Mode"));
       demand(elements().textContent.includes("隔離測試入口尚未啟用 API"), "API_MODE_NOT_DISABLED");
       demand(localStorage.length === 0, "API_POLLUTED_LOCAL_STORAGE"); pass("sourceIsolation");

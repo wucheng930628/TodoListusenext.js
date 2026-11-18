@@ -31,10 +31,10 @@ export async function evidenceFixture({ db = new MemoryClient(), tableName = "is
       dryRun: attestation("dryRun", "isolated-dynamodb-local", { report: dryReport }),
     } };
   const key = randomBytes(32); const sign = payload => ({ payload: structuredClone(payload), signature: createHmac("sha256", key).update(canonical(payload)).digest("hex") });
-  let signed = sign(bundle);
+  let signed = sign(bundle); let currentTime = time;
   const binding = { workspaceId: subject.workspaceId, migrationId: subject.migrationId };
   const readItem = async id => (await db.send(new GetCommand({ TableName: tableName, Key: { id }, ConsistentRead: true }))).Item;
-  const provider = createTrustedEvidenceProvider({ loadBundle: async () => signed, verifySignature: (body, signature) => verifyEvidenceSignature(body, signature, key), repository, service, readItem, tableName, endpoint: bundle.endpoint, now: () => time });
-  return { db, tableName, plan, service, repository, bundle, binding, sign, provider, setSigned(value) { signed = value; },
+  const provider = createTrustedEvidenceProvider({ loadBundle: async () => signed, verifySignature: (body, signature) => verifyEvidenceSignature(body, signature, key), repository, service, readItem, tableName, endpoint: bundle.endpoint, now: () => currentTime });
+  return { db, tableName, plan, service, repository, bundle, binding, sign, provider, setTime(value) { currentTime = value; }, setSigned(value) { signed = value; },
     snapshot: () => readWorkspaceView(repository, binding.workspaceId, { migrationService: service }) };
 }

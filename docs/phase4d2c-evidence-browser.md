@@ -4,11 +4,11 @@
 
 ## 本輪瀏覽器狀態
 
-專案及工具 runtime 均未安裝 Playwright／Puppeteer。Windows Computer Use 可發現 Chrome，並開啟新的空白無痕視窗；但取得視窗狀態時，安全機制因無法可靠確認目前 URL 而停止 Computer Use。沒有繞過限制，沒有再對瀏覽器輸入，也沒有開啟原網站或讀取真實 localStorage。
+專案未安裝 Playwright／Puppeteer。本輪以 Chrome DevTools Protocol 操作已安裝的無頭 Chrome，使用全新暫存設定檔、隔離 loopback origin 及 DynamoDB Local 測試表。
 
-八項 Browser Acceptance 本輪均為 **NOT TESTED**，不是 PASS、亦不是產品 FAIL。沒有 Browser Trace 或 Screenshot。原生工具建立的空白無痕視窗需由使用者自行關閉；不為了清理它而停止其他 Chrome 程序。
+驗收 run `485a6ea3-f279-48a7-8df7-c35aeb2325d6` 完成兩段驗收，中間由 Chrome 實際重整頁面。八項均為 **PASS**。驗收頁回報為未簽章的測試結果。本輪未擷取 Browser Trace 或 Screenshot。
 
-新增的隔離驗收頁面只在 Development、明確的受控 Table／run ID、fixture ownership proof 及額外 `SLOWLY_BROWSER_ACCEPTANCE_RUN_ID` 都一致時提供，否則 404。該頁面的 DOM driver 與真實瀏覽器 IndexedDB 行為尚待人工執行，不能把編譯成功當成瀏覽器通過。
+隔離驗收頁面只在 Development、明確的受控 Table／run ID、fixture ownership proof 及額外 `SLOWLY_BROWSER_ACCEPTANCE_RUN_ID` 都一致時提供，否則 404。
 
 ## 人工驗收：安全啟動與結束
 
@@ -23,7 +23,7 @@
 3. 開啟新的無痕視窗，只前往 runner 輸出的 `/dev/browser-acceptance`。此來源不得有既有 localStorage；頁面若回報 `FRESH_PRIVATE_BROWSER_REQUIRED`，停止，不能清空未知資料來通過。
 4. 按「執行隔離瀏覽器驗收」。第一段用受控的 client transport 模擬成功提交後 Response 遺失及 Receipt 暫時離線；並非切斷真實網路或修改 Windows 設定。
 5. 出現 `RELOAD REQUIRED` 後，在這個隔離視窗重新整理。只確認本次合成草稿／Pending 的離開提示，不能操作原網站。
-6. 按「繼續 Reload 驗收」。Task／Board 草稿測試會出現明確捨棄確認；只確認本次合成內容。觀察結果表，不可自行把 FAIL 或 NOT TESTED 改成 PASS。
+6. 按「繼續 Reload 驗收」。草稿保護確認後，測試會透過「檢視未儲存草稿」明確捨棄剩餘草稿，再檢查資料來源切換。只確認本次合成草稿的對話框。以結果表實際顯示的狀態記錄每項結果。
 7. 若任何一步失敗，保留頁面結果／測試 run ID，記錄實際步驟。不要執行正式修復或對真實資料重送。
 8. 保存人工驗收記錄後，在另一個 terminal 對 runner 輸出的精確 `STOP_FILE` 使用 `Set-Content -LiteralPath <STOP_FILE> -Value stop`。等 runner 確認 `serverStopped:true`、`cleaned:true` 後才視為結束。不要以模糊前綴刪除 Table。
 9. 關閉本次無痕視窗。不得清除原網站的 storage。若清理權限不足，保留 run report 並先確認 PID／Table ownership，不停止未知程序。
@@ -32,14 +32,14 @@
 
 | 檢查 | 人工觀察／預期結果 | 本輪 |
 | --- | --- | --- |
-| indexedDbPending | DevTools Application → IndexedDB `slowly-api-recovery-v1-isolated` → operations → active，可見原 Key、scope、Payload；請求尚未確認時不消失 | NOT TESTED |
-| unknownReload | 重新整理後仍是原 Key／Payload；尚未查明時禁止新寫入，不自動開啟 API | NOT TESTED |
-| confirmedRefresh | Receipt CONFIRMED 後讀取目前伺服器版本；只出現一筆 `Browser confirmed latest`，不還原舊 Create 回應 | NOT TESTED |
-| draftProtection | Task／Board／Widget 輸入保留；切換來源、Workspace 或 Board 被阻擋；取消需明確確認 | NOT TESTED |
-| pendingSwitch | 儲存中不能切換 Workspace／資料來源；取消等待不代表取消 server commit | NOT TESTED |
-| conflict409 | 測試外部版本更新後儲存舊草稿，顯示衝突，不關閉／清除輸入，不顯示成功 | NOT TESTED |
-| legacyProtection | 只在本次空白隔離來源放入合成 v1；缺少 v2 時顯示阻擋，不建立 v2、不改寫 v1 | NOT TESTED |
-| sourceIsolation | API 操作不建立或修改 localStorage；切回本機時不混合 API cache；測試設定不能帶入正式首頁 | NOT TESTED |
+| indexedDbPending | DevTools Application → IndexedDB `slowly-api-recovery-v1-isolated` → operations → active，可見原 Key、scope、Payload；請求尚未確認時不消失 | PASS |
+| unknownReload | 重新整理後仍是原 Key／Payload；尚未查明時禁止新寫入，不自動開啟 API | PASS |
+| confirmedRefresh | Receipt CONFIRMED 後讀取目前伺服器版本；只出現一筆 `Browser confirmed latest`，不還原舊 Create 回應 | PASS |
+| draftProtection | Task／Board／Widget 輸入保留；切換來源、Workspace 或 Board 被阻擋；取消需明確確認 | PASS |
+| pendingSwitch | 儲存中不能切換 Workspace／資料來源；取消等待不代表取消 server commit | PASS |
+| conflict409 | 測試外部版本更新後儲存舊草稿，顯示衝突，不關閉／清除輸入，不顯示成功 | PASS |
+| legacyProtection | 只在本次空白隔離來源放入合成 v1；缺少 v2 時顯示阻擋，不建立 v2、不改寫 v1 | PASS |
+| sourceIsolation | API 操作不建立或修改 localStorage；切回本機時不混合 API cache；測試設定不能帶入正式首頁 | PASS |
 
 結果頁只是未簽章的測試結果，**不是可信任 Cutover 授權**。需要人工檢視、保存證據並另行批准；本輪未發行任何正式 Browser PASS 或 Cutover 證據。
 
@@ -69,7 +69,15 @@ Provider 是初次 Cutover 的唯讀 preflight，最多產生 30 秒有效報告
 
 正式資料表尚無本次 Migration Session；真實瀏覽器未完成驗收，故正式 Cutover 保持 NOT READY。下一步需先完成上述人工驗收、重新確認最新來源與正式目標，再另行授權正式 Migration（建議先止於 Verify／Release Preview）、Release、證據簽署／配置與 Cutover。
 
-## 本輪實際結果與檔案
+## 2026-11-18 複驗
+
+- Node／React／API／Migration／Mock 共 217 項通過，含 10 項 Evidence 測試。DynamoDB Local 隔離驗證包括 Dry Run 6 項、Provider 7 項及 Main UI／HTTP 20 項。
+- Provider 比對 Workspace View 的實體版本與 Migration 狀態，並於最後讀取後再次確認 View 可用及證據期限。
+- SlowlyTasks 與 SlowlyByParent 均為 ACTIVE。Workspace／Board／Task／Widget 各 0，未能判定歸屬的既有 Item 1。正式表前後雜湊一致。
+- Build 與本輪修改程式的 ESLint 通過。全專案 ESLint 仍有既有 3 errors、1 warning。
+- 本輪建立的隔離表、伺服器及 Chrome 設定檔均已清理。唯讀清單仍有一張本輪開始前即存在的 Phase 4B-2 測試表，保留供其原執行環境處理。
+
+## 前次執行記錄與檔案
 
 - Node／React／Mock：214 項通過、0 失敗。新增 `npm.cmd run test:trusted-evidence`（7 項），其餘既有 16 組 scripts 均已本輪重跑。
 - `npm.cmd run test:db:trusted-evidence`：7 組實際 DynamoDB Local 隔離驗證通過；證據均為合成，不是 Browser PASS。

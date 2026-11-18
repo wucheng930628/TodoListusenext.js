@@ -4,11 +4,11 @@ import { canonical, hash } from "./plan-v2.mjs";
 import { prepareDryRun } from "./dry-run.mjs";
 import { checkCutoverReadiness } from "./cutover-readiness.mjs";
 import { readWorkspaceView } from "../api/workspace-view.mjs";
-import { projectMainView } from "../client/main-view-model.mjs";
 
 export const browserChecks = Object.freeze(["indexedDbPending", "unknownReload", "confirmedRefresh", "draftProtection", "pendingSwitch", "conflict409", "legacyProtection", "sourceIsolation"]);
 const deny = code => { throw Object.assign(new Error("Trusted cutover evidence is unavailable or inconsistent."), { code }); };
 const subjectMatches = (a, b) => a && hash(a) === hash(b);
+const viewFingerprint = snapshot => hash([snapshot.workspace, snapshot.boards, snapshot.readiness.migration]);
 
 // Only the server owns this key. Neither signatures nor browser assertions replace live DB checks.
 export function verifyEvidenceSignature(payload, signature, key) {
@@ -59,8 +59,8 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
       if (before.sourceBinding?.backupFingerprint !== subject.backupFingerprint || hash(before.sourceBinding?.sourcePolicy) !== hash(plan.policies.sourcePolicy) ||
         before.manifestHash !== hash(plan.operations.map(op => ({ operationId: op.operationId, key: op.key, targetId: op.targetId, fingerprint: op.fingerprint })))) return blocked("LIVE_SESSION_BINDING_CONFLICT");
       const currentView = await readWorkspaceView(repository, subject.workspaceId, { migrationService: service });
-      if (!currentView.readiness.eligible || (presentedSnapshot && (presentedSnapshot.workspace?.id !== subject.workspaceId ||
-        hash(projectMainView(presentedSnapshot, subject.workspaceId).workspace) !== hash(projectMainView(currentView, subject.workspaceId).workspace)))) return blocked("VIEW_CHANGED_OR_INCOMPLETE");
+      if (!currentView.readiness.eligible || (presentedSnapshot &&
+        (!presentedSnapshot.readiness.eligible || viewFingerprint(presentedSnapshot) !== viewFingerprint(currentView)))) return blocked("VIEW_CHANGED_OR_INCOMPLETE");
       const probes = {
         dynamodbLocal: async () => endpoint === "http://127.0.0.1:9000",
         apiRepositoryTests: async () => validation.failed === 0,
@@ -79,10 +79,13 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
         authorization: { enabled: approval.approved === true, workspaceId: subject.workspaceId, migrationId: subject.migrationId, backupFingerprint: subject.backupFingerprint, expiresAt: approval.expiresAt } });
       const after = await service.getSession(subject.migrationId);
       const finalView = await readWorkspaceView(repository, subject.workspaceId, { migrationService: service });
-      const versions = snapshot => hash([snapshot.workspace, snapshot.boards]);
-      if (before.version !== after.version || currentView.workspace.version !== finalView.workspace.version || versions(currentView) !== versions(finalView) || now() >= bundle.expiresAt) return blocked("EVIDENCE_CHANGED_DURING_CHECK");
+      if (before.version !== after.version || !finalView.readiness.eligible ||
+        viewFingerprint(currentView) !== viewFingerprint(finalView)) return blocked("EVIDENCE_CHANGED_DURING_CHECK");
+      const expiresAt = report.ready ? Math.min(report.expiresAt, bundle.expiresAt, ...Object.values(attestations).map(item => item.expiresAt)) : null;
+      const completedAt = now();
+      if (completedAt >= bundle.expiresAt || Object.values(attestations).some(item => completedAt >= item.expiresAt) || (report.ready && completedAt >= expiresAt)) return blocked("EVIDENCE_EXPIRED_DURING_CHECK");
       return { ...report, planId: subject.planId, backupFingerprint: subject.backupFingerprint, sessionVersion: after.version,
-        expiresAt: report.ready ? Math.min(report.expiresAt, bundle.expiresAt, ...Object.values(attestations).map(item => item.expiresAt)) : null };
+        expiresAt };
     } catch (error) { return blocked(/^[A-Z_]{1,80}$/.test(error.code || "") ? error.code : "EVIDENCE_VERIFICATION_FAILED"); }
   };
 }

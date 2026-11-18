@@ -48,6 +48,15 @@ test("presented stale UI view is rejected; no configured provider leaves formal 
   const result = await formalCutoverEvidence(f.binding, snapshot, {}); assert.equal(result.cutoverEnabled, false);
 });
 
+test("matching UI data with stale entity versions cannot carry cutover authority", async () => {
+  const f = await evidenceFixture();
+  const snapshot = await f.snapshot();
+  snapshot.boards[0].tasks[0].version++;
+  const result = await f.provider(f.binding, snapshot);
+  assert.equal(result.cutoverEnabled, false);
+  assert.deepEqual(result.blockers, ["VIEW_CHANGED_OR_INCOMPLETE"]);
+});
+
 test("missing/unconfirmed Receipt or changed Verify/Release certificate stays NOT READY", async () => {
   for (const alter of [f => { const op = f.plan.operations[0]; f.db.items.delete(`SLOWLY#MIGRATION_OPERATION#${f.plan.planId}#${op.operationId}`); },
     f => { const receipt = [...f.db.items.values()].find(item => item.entityType === "MIGRATION_OPERATION"); receipt.state = "PENDING"; },
@@ -55,4 +64,21 @@ test("missing/unconfirmed Receipt or changed Verify/Release certificate stays NO
     f => { f.db.items.get(`SLOWLY#MIGRATION_SESSION#${f.plan.planId}`).lockState = "HELD"; }]) {
     const f = await evidenceFixture(); alter(f); assert.equal((await f.provider(f.binding)).cutoverEnabled, false);
   }
+});
+
+test("an individual attestation expiring during live reads returns NOT READY, not an expired ready report", async () => {
+  const f = await evidenceFixture(); const bundle = structuredClone(f.bundle);
+  bundle.attestations.browser.expiresAt = bundle.issuedAt + 1; f.setSigned(f.sign(bundle));
+  const getSession = f.service.getSession; let reads = 0;
+  f.service.getSession = async (...args) => { const session = await getSession(...args); if (++reads === 4) f.setTime(bundle.issuedAt + 2); return session; };
+  const result = await f.provider(f.binding);
+  assert.equal(reads >= 4, true); assert.equal(result.cutoverEnabled, false); assert.equal(result.expiresAt, null);
+  assert.deepEqual(result.blockers, ["EVIDENCE_EXPIRED_DURING_CHECK"]);
+});
+
+test("Gate's short TTL is checked again after the final Workspace read", async () => {
+  const f = await evidenceFixture(); const getSession = f.service.getSession; let reads = 0;
+  f.service.getSession = async (...args) => { const session = await getSession(...args); if (++reads === 4) f.setTime(f.bundle.issuedAt + 40000); return session; };
+  const result = await f.provider(f.binding);
+  assert.equal(result.ready, false); assert.equal(result.expiresAt, null); assert.deepEqual(result.blockers, ["EVIDENCE_EXPIRED_DURING_CHECK"]);
 });
