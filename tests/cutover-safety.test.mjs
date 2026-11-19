@@ -47,7 +47,11 @@ test("Formal runtime view is readable but does not grant UI writes without the C
     const view = await f.api.getWorkspaceView(...args); Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: false }); return view;
   } };
   const c = controllerFor(f, api); await activate(c, f);
+  const draft = { title: "Preserve unauthorized draft", status: "todo" };
+  c.writeDraft("task-editor", draft);
   assert.equal(c.getSnapshot().status, "success"); assert.throws(() => c.authorizeWrites(f.workspaceId), { code: "CUTOVER_REQUIRED" });
+  await assert.rejects(c.saveTask(draft), { code: "CUTOVER_REQUIRED" });
+  assert.deepEqual(c.readDraft("task-editor"), draft);
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 

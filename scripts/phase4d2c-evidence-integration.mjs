@@ -4,6 +4,7 @@ import { DynamoDBClient, CreateTableCommand, DescribeTableCommand, DeleteTableCo
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { evidenceFixture } from "../tests/helpers/evidence-fixture.mjs";
 import { formalCutoverEvidence } from "../src/lib/api/formal-evidence.mjs";
+import { runAuthorizationScenario } from "../tests/helpers/cutover-authorization-scenario.mjs";
 
 if (!process.argv.includes("--isolated-table")) throw new Error("Explicit isolated table required");
 const runId = randomUUID(); const tableName = `Slowly_Phase4D2C_${runId.replaceAll("-", "")}`; const endpoint = "http://127.0.0.1:9000";
@@ -28,7 +29,8 @@ try {
   f.setSigned({ payload: f.bundle, signature: "0".repeat(64) }); check(!(await f.provider(f.binding)).ready, "Forged browser ready/signature denied");
   const expired = structuredClone(f.bundle); expired.expiresAt = 0; f.setSigned(f.sign(expired)); check(!(await f.provider(f.binding)).ready, "Expired evidence denied");
   const changed = structuredClone(f.bundle); changed.subject.planId = "0".repeat(64); f.setSigned(f.sign(changed)); check(!(await f.provider(f.binding)).ready, "Different Plan denied");
-  f.setSigned(f.sign(f.bundle)); readOnly = false; const taskOp = f.plan.operations.find(op => op.type === "TASK"); const task = await f.repository.getTask(taskOp.targetId);
+  readOnly = false; await runAuthorizationScenario(f); check(true, "Durable authorization CAS permits exactly one redemption and revocation closes the gate");
+  f.setSigned(f.sign(f.bundle)); const taskOp = f.plan.operations.find(op => op.type === "TASK"); const task = await f.repository.getTask(taskOp.targetId);
   await f.repository.updateTask(task.boardId, task.id, { ...task.data, notes: "Synthetic version change" }, task.version); readOnly = true;
   check(!(await f.provider(f.binding)).ready, "Live changed target version/Fidelity denied");
   check(!(await formalCutoverEvidence(f.binding, null, {})).cutoverEnabled, "Unconfigured formal provider stays NOT READY without IO");

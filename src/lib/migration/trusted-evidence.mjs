@@ -18,7 +18,8 @@ export function verifyEvidenceSignature(payload, signature, key) {
 }
 
 /** No write operations. All dependencies are server-owned; no Request Body is accepted. */
-export function createTrustedEvidenceProvider({ loadBundle, repository, service, readItem, verifySignature, now = () => Date.now(), endpoint, tableName }) {
+export function createTrustedEvidenceProvider({ loadBundle, repository, service, readItem, verifySignature,
+  requireBrowserState = false, redeemedUntil, now = () => Date.now(), endpoint, tableName }) {
   return async (binding, presentedSnapshot) => {
     const blocked = code => ({ ready: false, cutoverEnabled: false, workspaceId: binding.workspaceId, migrationId: binding.migrationId,
       planId: binding.migrationId, expiresAt: null, blockers: [code] });
@@ -62,6 +63,9 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
       if (freeze.frozen !== true) return blocked("SOURCE_NOT_FROZEN");
       const approval = validate("approval", "explicit-operator-approval");
       if (approval.approved !== true) return blocked("CUTOVER_APPROVAL_REQUIRED");
+      if (requireBrowserState && (approval.browserState?.pendingWrite !== false || approval.browserState.unknownOperation !== false ||
+        approval.browserState.unsavedDrafts !== false || approval.browserState.recoveryJournalClear !== true ||
+        approval.browserState.sourceMatchesBackup !== true)) return blocked("BROWSER_STATE_CONFIRMATION_REQUIRED");
       const dryRun = validate("dryRun", "isolated-dynamodb-local");
       const run = dryRun.report?.migration || dryRun.report;
       if (dryRun.report?.cleaned !== true || run?.planId !== subject.planId || run.backupFingerprint !== subject.backupFingerprint) return blocked("DRY_RUN_EVIDENCE_CONFLICT");
@@ -93,11 +97,15 @@ export function createTrustedEvidenceProvider({ loadBundle, repository, service,
       const finalView = await readWorkspaceView(repository, subject.workspaceId, { migrationService: service });
       if (before.version !== after.version || !finalView.readiness.eligible ||
         viewFingerprint(currentView) !== viewFingerprint(finalView)) return blocked("EVIDENCE_CHANGED_DURING_CHECK");
-      const expiresAt = report.ready ? Math.min(report.expiresAt, bundle.expiresAt, ...Object.values(attestations).map(item => item.expiresAt)) : null;
+      const evidenceExpiresAt = Math.min(bundle.expiresAt, ...Object.values(attestations).map(item => item.expiresAt));
+      const redemptionExpiry = report.ready && redeemedUntil ? await redeemedUntil(bundle) : evidenceExpiresAt;
+      const expiresAt = report.ready ? Math.min(report.expiresAt, evidenceExpiresAt, redemptionExpiry ?? 0) : null;
       const completedAt = now();
+      if (report.ready && redeemedUntil && !(redemptionExpiry > completedAt)) return { ...blocked("CUTOVER_REDEMPTION_REQUIRED"),
+        evidenceVerified: true, sessionVersion: after.version, evidenceExpiresAt };
       if (completedAt >= bundle.expiresAt || Object.values(attestations).some(item => completedAt >= item.expiresAt) || (report.ready && completedAt >= expiresAt)) return blocked("EVIDENCE_EXPIRED_DURING_CHECK");
       return { ...report, planId: subject.planId, backupFingerprint: subject.backupFingerprint, sessionVersion: after.version,
-        expiresAt };
+        expiresAt, evidenceExpiresAt, evidenceVerified: report.ready };
     } catch (error) { return blocked(/^[A-Z_]{1,80}$/.test(error.code || "") ? error.code : "EVIDENCE_VERIFICATION_FAILED"); }
   };
 }
