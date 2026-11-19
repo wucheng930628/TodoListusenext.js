@@ -97,7 +97,7 @@ export async function prepareDryRun(artifact, options) {
     report.blockers.push({ code: error instanceof DataError ? error.code : "PREVIEW_INVALID" });
     if (Array.isArray(error.cause)) for (const issue of error.cause) if (issue.severity === "error") report.blockers.push({ code: issue.code });
   }
-  return { backup, ...(plan?.sourceBinding ? { artifact: structuredClone(artifact) } : {}), plan, workspace, report, valid: report.blockers.length === 0 };
+  return { backup, sourceInfo: verified.sourceInfo, ...(plan?.sourceBinding ? { artifact: structuredClone(artifact) } : {}), plan, workspace, report, valid: report.blockers.length === 0 };
 }
 
 export function assertDryRunTable(tableName, runId) {

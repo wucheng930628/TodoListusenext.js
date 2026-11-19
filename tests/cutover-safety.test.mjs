@@ -42,15 +42,16 @@ test("Reload bootstrap never enables API automatically and freezes local edits f
   await activate(c, f); assert.equal(c.getSnapshot().uncertainWrite, true);
 });
 
-test("Formal runtime view is readable but does not grant UI writes without the Cutover Gate", async () => {
+test("Formal runtime view does not activate API mode without the Cutover Gate", async () => {
   const f = await mainUiFixture(); const api = { ...f.api, getWorkspaceView: async (...args) => {
     const view = await f.api.getWorkspaceView(...args); Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: false }); return view;
   } };
-  const c = controllerFor(f, api); await activate(c, f);
+  const c = controllerFor(f, api);
+  await assert.rejects(activate(c, f), { code: "CUTOVER_REQUIRED" });
+  assert.equal(c.getSnapshot().mode, "localStorage");
   const draft = { title: "Preserve unauthorized draft", status: "todo" };
   c.writeDraft("task-editor", draft);
-  assert.equal(c.getSnapshot().status, "success"); assert.throws(() => c.authorizeWrites(f.workspaceId), { code: "CUTOVER_REQUIRED" });
-  await assert.rejects(c.saveTask(draft), { code: "CUTOVER_REQUIRED" });
+  await assert.rejects(activate(c, f), { code: "UNSAVED_DRAFTS" });
   assert.deepEqual(c.readDraft("task-editor"), draft);
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
@@ -174,8 +175,8 @@ test("Expired formal Cutover authority cannot grant or dispatch another UI write
   const f = await mainUiFixture(); const api = { ...f.api, getWorkspaceView: async (...args) => {
     const view = await f.api.getWorkspaceView(...args); Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: true, formalCutoverExpiresAt: 1 }); return view;
   } };
-  const c = controllerFor(f, api); await activate(c, f); assert.throws(() => c.authorizeWrites(f.workspaceId), { code: "CUTOVER_REQUIRED" });
-  await assert.rejects(c.saveTask({ title: "Not sent", status: "todo" }), { code: "CUTOVER_REQUIRED" });
+  const c = controllerFor(f, api); await assert.rejects(activate(c, f), { code: "CUTOVER_REQUIRED" });
+  await assert.rejects(c.saveTask({ title: "Not sent", status: "todo" }), { code: "WRITES_DISABLED" });
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 

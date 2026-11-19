@@ -23,7 +23,7 @@ export function createCutoverAuthorization({ db, tableName, service, verify, now
   async function transition(action, { binding, signed, confirmation }) {
     requireValue(["request", "approve", "redeem", "revoke"].includes(action), "Unknown authorization action");
     const payload = signed?.payload;
-    requireValue(payload?.formatVersion === 2 && payload.purpose === "cutover" && payload.tableName === tableName &&
+    requireValue(payload?.formatVersion === 2 && payload.purpose === "cutover-request" && payload.tableName === tableName &&
       payload.subject?.workspaceId === binding.workspaceId && payload.subject.migrationId === binding.migrationId &&
       payload.subject.planId === binding.migrationId && payload.subject.sourceNamespace === binding.sourceNamespace,
     "Authorization scope differs", "CUTOVER_AUTHORIZATION_SCOPE");
@@ -40,12 +40,16 @@ export function createCutoverAuthorization({ db, tableName, service, verify, now
     }
 
     const expected = { request: undefined, approve: "REQUESTED", redeem: "APPROVED" }[action];
-    requireValue(prior?.state === expected && (action === "request" ? !prior : prior.entityType === recordType &&
-      prior.evidenceId === evidenceId && hash(prior.subject) === hash(payload.subject)),
+    const matchingRequest = row => row?.state === "REQUESTED" && row.entityType === recordType &&
+      row.evidenceId === evidenceId && hash(row.subject) === hash(payload.subject) &&
+      row.sessionVersion === payload.release?.sessionVersion && row.releaseHash === payload.release?.verificationHash && row.expiresAt > now();
+    const duplicate = action === "request" && matchingRequest(prior);
+    requireValue(duplicate || (prior?.state === expected && (action === "request" ? !prior : prior.entityType === recordType &&
+      prior.evidenceId === evidenceId && hash(prior.subject) === hash(payload.subject))),
     "Authorization transition is unavailable or already used", "CUTOVER_AUTHORIZATION_STATE");
     const verified = await verify(binding, signed);
     const time = now();
-    requireValue(verified.ready === true && verified.cutoverEnabled === true && verified.expiresAt > time &&
+    requireValue(verified.requestEligible === true && verified.evidenceVerified === true &&
       verified.evidenceExpiresAt > time && verified.sessionVersion === payload.release?.sessionVersion,
     "Trusted evidence could not be revalidated", "CUTOVER_EVIDENCE_NOT_READY");
     const session = await service.getSession(binding.migrationId);
@@ -54,8 +58,9 @@ export function createCutoverAuthorization({ db, tableName, service, verify, now
       session.sourceBinding?.backupFingerprint === payload.subject.backupFingerprint,
     "Release changed", "CUTOVER_AUTHORIZATION_SCOPE");
     const expiresAt = prior?.expiresAt ?? Math.min(verified.evidenceExpiresAt, time + 900000);
-    requireValue(now() < expiresAt && now() < verified.expiresAt && (!prior || prior.sessionVersion === session.version),
+    requireValue(now() < expiresAt && now() < verified.evidenceExpiresAt && (!prior || prior.sessionVersion === session.version),
       "Authorization expired or session changed", "CUTOVER_AUTHORIZATION_EXPIRED");
+    if (duplicate) return prior;
     const next = { id, entityType: recordType, evidenceId, subject: payload.subject, sessionVersion: session.version,
       releaseHash: session.releaseVerificationHash, expiresAt, version: (prior?.version ?? 0) + 1, ...{
         request: { state: "REQUESTED", requestedAt: time },
@@ -65,15 +70,25 @@ export function createCutoverAuthorization({ db, tableName, service, verify, now
     // Compare immutable Release authority in the same transaction as the
     // authorization CAS. A concurrent transition cannot consume it twice.
     const { id: sessionId, entityType, version, state, lockState, releaseWorkspaceId, releaseVerificationHash } = session;
-    await store.transact([store.check({ id: sessionId, entityType, version, state, lockState, releaseWorkspaceId, releaseVerificationHash }),
-      store.put(next, prior)]);
+    try {
+      await store.transact([store.check({ id: sessionId, entityType, version, state, lockState, releaseWorkspaceId, releaseVerificationHash }),
+        store.put(next, prior)]);
+    } catch (error) {
+      if (action !== "request" || error.code !== "CONFLICT") throw error;
+      const existing = await status(payload);
+      const current = await service.getSession(binding.migrationId);
+      if (!matchingRequest(existing) || current.version !== version || current.state !== state || current.lockState !== lockState ||
+        current.releaseVerificationHash !== releaseVerificationHash) throw error;
+      return existing;
+    }
     return next;
   }
 
-  async function redeemedUntil(payload) {
+  async function redeemedUntil(payload, observedAt) {
     const row = await status(payload);
     return row?.state === "REDEEMED" && row.sessionVersion === payload.release?.sessionVersion &&
-      row.releaseHash === payload.release?.verificationHash && Number.isSafeInteger(row.expiresAt) && row.expiresAt > now()
+      row.releaseHash === payload.release?.verificationHash && Number.isSafeInteger(row.redeemedAt) &&
+      (observedAt === undefined || row.redeemedAt <= observedAt) && Number.isSafeInteger(row.expiresAt) && row.expiresAt > now()
       ? row.expiresAt : null;
   }
 

@@ -31,7 +31,7 @@ export function formalEvidenceDependencies(db, key) {
   const tableName = "SlowlyTasks";
   return { tableName, endpoint: "http://127.0.0.1:9000", service: createMigrationService(db, { tableName }),
     repository: createRepository(db, { tableName }), verifySignature: (body, signature) => verifyEvidenceSignature(body, signature, key),
-    requireBrowserState: true,
+    formalAuthorization: true,
     readItem: async id => (await db.send(new GetCommand({ TableName: tableName, Key: { id }, ConsistentRead: true }))).Item };
 }
 
