@@ -87,6 +87,7 @@ export default function TaskAnalytics({ tasks, now, size, onResize, embedded = f
   const [dimensions, setDimensions] = useState(size || null);
   const [measuredWidth, setMeasuredWidth] = useState(800);
   const [measuredHeight, setMeasuredHeight] = useState(124);
+  const isLoading = now === null;
 
   useEffect(() => {
     if (!panel.current) return;
@@ -96,7 +97,7 @@ export default function TaskAnalytics({ tasks, now, size, onResize, embedded = f
     });
     observer.observe(panel.current);
     return () => observer.disconnect();
-  }, [now === null]);
+  }, [isLoading]);
 
   function startResize(event) {
     if (event.button !== 0) return;
@@ -134,7 +135,7 @@ export default function TaskAnalytics({ tasks, now, size, onResize, embedded = f
     onResize(next);
   }
 
-  if (now === null) return <section className="task-analytics" aria-label="任務完成統計">正在載入統計…</section>;
+  if (isLoading) return <section className="task-analytics" aria-label="任務完成統計">正在載入統計…</section>;
   const stats = getAnalytics(tasks, now);
   const maximum = Math.max(1, ...stats.days.map(day => day.count));
   const sevenDayTotal = stats.days.reduce((total, day) => total + day.count, 0);
