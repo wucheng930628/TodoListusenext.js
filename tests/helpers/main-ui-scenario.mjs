@@ -70,8 +70,11 @@ export async function runMainUiScenario(f, secondWorkspaceId, check) {
       const view = await f.api.getWorkspaceView(f.workspaceId); const entry = view.boards.find(entry => entry.board.data.id === boardId); const record = entry.tasks.find(row => row.data.id === task.id);
       await f.repository.updateTask(entry.board.id, record.id, { ...record.data, title: "external" }, record.version);
       await host.act(async () => { await assert.rejects(session().saveTask({ ...task, title: "stale" }, { expectedVersion: version }), { status: 409 }); });
+      assert.equal(session().writable, false);
       assert.equal(session().workspace.boards.find(board => board.id === boardId).tasks[0].title, task.title);
       await host.act(() => session().refresh()); assert.equal(session().workspace.boards.find(board => board.id === boardId).tasks[0].title, "external");
+      assert.equal(session().writable, false);
+      await grant(f.workspaceId);
     });
     await check("lost POST response issues once and recovers through its persistent receipt", async () => {
       f.failNextWrite("after"); const before = f.calls.filter(call => call.method === "POST").length;

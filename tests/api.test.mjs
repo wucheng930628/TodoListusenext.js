@@ -29,6 +29,19 @@ async function seed(call) {
   return { workspace, otherWorkspace, board, otherBoard };
 }
 
+test("formal Workspace view configuration blocks direct CRUD mutations before repository access", async () => {
+  let accessed = false;
+  const { call } = fixture({ environment: { ...env, SLOWLY_FORMAL_VIEW_ENABLED: "1" },
+    getRepository: async () => { accessed = true; throw new Error("Unexpected repository access"); } });
+  for (const [resource, handler, method] of [["workspaces", "collectionPost", "POST"], ["tasks", "itemPatch", "PATCH"],
+    ["boards", "itemDelete", "DELETE"], ["widgets", "orderPatch", "PATCH"]]) {
+    const reply = await call(resource, handler, { method });
+    assert.equal(reply.status, 403);
+    assert.equal(reply.body.error.code, "FORBIDDEN");
+  }
+  assert.equal(accessed, false);
+});
+
 test("Workspace POST/GET/PATCH and explicit collection lookup return documented statuses", async () => {
   const { call } = fixture();
   assert.equal((await call("workspaces", "collectionGet")).status, 501);

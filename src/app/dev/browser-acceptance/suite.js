@@ -102,6 +102,10 @@ export default function BrowserAcceptance({ runId, workspaceIds }) {
       demand(titleInput().value === "Browser unsaved task draft", "CONFLICT_DRAFT_LOST"); pass("conflict409");
       await click(elements().querySelector('dialog.task-panel button[aria-label="關閉任務面板"]'));
       await until(() => !elements().querySelector("dialog.task-panel"));
+      demand(button("看板設定").disabled, "CONFLICT_DID_NOT_REVOKE_WRITES");
+      await click(button("重新讀取 API 資料"));
+      await until(() => !button("另外授權寫入")?.disabled);
+      await grant(id);
       await click(button("看板設定")); await until(() => elements().querySelector("dialog[open] textarea"));
       await type(elements().querySelector("dialog[open] textarea"), "Browser unsaved board draft");
       await activate(workspaceIds[0]);

@@ -82,7 +82,8 @@ export function createWorkspaceViewApi({ getRepository, getMigrationService, con
         const gate = cutoverReadiness ? await cutoverReadiness(binding, snapshot) : null;
         const enabled = gate?.ready === true && gate.cutoverEnabled === true && gate.migrationId === binding.migrationId && gate.workspaceId === id &&
           gate.sessionVersion === snapshot.readiness.migration.version && Number.isFinite(gate.expiresAt) && gate.expiresAt > Date.now();
-        Object.assign(snapshot.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: enabled, formalCutoverExpiresAt: enabled ? gate.expiresAt : null });
+        Object.assign(snapshot.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: enabled,
+          formalCutoverExpiresAt: enabled ? gate.expiresAt : null, formalRuntimeWritesEnabled: false });
       }
       return Response.json({ data: snapshot }, { headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
     } catch (error) {

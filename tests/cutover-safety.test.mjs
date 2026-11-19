@@ -55,6 +55,22 @@ test("Formal runtime view is readable but does not grant UI writes without the C
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 
+test("A redeemed Cutover Gate cannot turn a formal read-only View into mutation authority", async () => {
+  const f = await mainUiFixture();
+  const api = { ...f.api, getWorkspaceView: async (...args) => {
+    const view = await f.api.getWorkspaceView(...args);
+    Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: true,
+      formalCutoverExpiresAt: Date.now() + 60000, formalRuntimeWritesEnabled: false });
+    return view;
+  } };
+  const c = controllerFor(f, api);
+  await activate(c, f);
+  assert.equal(c.getSnapshot().status, "success");
+  assert.throws(() => c.authorizeWrites(f.workspaceId), { code: "WRITES_DISABLED" });
+  await assert.rejects(c.saveTask({ title: "Read-only", status: "todo" }), { code: "WRITES_DISABLED" });
+  assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
+});
+
 test("formal View returns 403 for Workspace access denial and 409 for persisted binding conflicts", async () => {
   const f = await evidenceFixture(); let access = 0;
   const workspaceId = f.binding.workspaceId;

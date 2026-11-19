@@ -18,6 +18,9 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
   }
   function requireFormalWrites() {
     if (!formalWritesAllowed()) throw error("CUTOVER_REQUIRED", "正式 Cutover Gate 尚未授權或已過期，保持唯讀。");
+    if (state.projection?.snapshot.readiness?.capabilities?.formalRuntimeWritesEnabled === false) {
+      throw error("WRITES_DISABLED", "正式 API 尚未授權業務寫入，保持唯讀。");
+    }
   }
   function guardSwitch({ recovery = false } = {}) {
     if (pending || activating) throw error("MUTATION_IN_PROGRESS", "仍有操作進行，請等待結果；取消等待不代表伺服器已取消。");
@@ -124,9 +127,11 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
         if (!claimed) journalReady = false;
         if (intent && !uncertain) createIntent = null;
         const authorityChanged = cause.code === "MIGRATION_LOCKED" || [403, 404].includes(cause.status);
+        const versionConflict = cause.status === 409 && cause.code === "CONFLICT";
         publish({ mutation: uncertain ? "not-confirmed" : "error", error: cause, uncertainWrite: uncertain,
           ...(intent && uncertain ? { createRecovery: { operationKey: intent.operationKey, state: "UNKNOWN", checking: false } } : {}),
-          ...(!journalReady || uncertain || authorityChanged || cause.code === "CUTOVER_REQUIRED" ? { allowWrites: false } : {}), ...(authorityChanged ? { status: "error" } : {}) });
+          ...(!journalReady || uncertain || authorityChanged || versionConflict || cause.code === "CUTOVER_REQUIRED" ? { allowWrites: false } : {}),
+          ...(authorityChanged || versionConflict ? { status: "error" } : {}) });
         if (intent && uncertain) {
           pending = false;
           try { const receipt = await recoverCreate(); if (receipt?.state === "CONFIRMED") return receipt.result; }

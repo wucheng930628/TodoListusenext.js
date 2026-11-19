@@ -105,7 +105,13 @@ export function createApi(resource, { getRepository, configuration = () => proce
   const definition = definitions[resource]; requireValue(definition, "Unknown resource");
   const { type, singular } = definition;
   const wrap = action => async (request, context = {}) => {
-    try { guard(request, configuration()); return await action(request, context); }
+    try {
+      const env = configuration();
+      guard(request, env);
+      requireValue(env.SLOWLY_FORMAL_VIEW_ENABLED !== "1" || ["GET", "HEAD"].includes(request.method),
+        "Formal Workspace View has no server-side mutation authority", "FORBIDDEN");
+      return await action(request, context);
+    }
     catch (error) {
       const code = error instanceof DataError && codes[error.code] ? error.code : "INTERNAL";
       return Response.json({ error: { code, message: messages[code] || "An unexpected server error occurred." } }, { status: codes[code] || 500, headers });
