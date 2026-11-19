@@ -51,7 +51,7 @@ test("Formal runtime view is readable but does not grant UI writes without the C
   assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 
-test("formal View requires exact server-owned Workspace/Plan binding before data access", async () => {
+test("formal View returns 403 for Workspace access denial and 409 for persisted binding conflicts", async () => {
   const f = await evidenceFixture(); let access = 0;
   const workspaceId = f.binding.workspaceId;
   const env = { NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_FORMAL_VIEW_ENABLED: "1", SLOWLY_FORMAL_VIEW_WORKSPACE: workspaceId,
@@ -60,9 +60,14 @@ test("formal View requires exact server-owned Workspace/Plan binding before data
     getRepository: async () => { access++; return f.repository; }, getMigrationService: async () => f.service });
   const call = (config, id = workspaceId) => handler(config)(new Request(`http://127.0.0.1:3000/api/workspaces/${encodeURIComponent(id)}/view`, { headers: { host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000" } }), { params: Promise.resolve({ id }) });
   for (const config of [{ ...env, SLOWLY_FORMAL_VIEW_ENABLED: "0" }, { ...env, NODE_ENV: "production" }, { ...env, DYNAMODB_ENDPOINT: "https://dynamodb.amazonaws.com" }, { ...env, SLOWLY_MAIN_UI_TEST: "1" }]) assert.equal((await call(config)).status, 403);
-  assert.equal((await call(env, `SLOWLY#WORKSPACE#${randomUUID()}`)).status, 403); assert.equal(access, 0);
-  assert.equal((await call({ ...env, SLOWLY_FORMAL_VIEW_SOURCE_NAMESPACE: "other-source" })).status, 409); assert.equal(access, 0);
-  assert.equal((await call({ ...env, SLOWLY_FORMAL_VIEW_PLAN: "0".repeat(64) })).status, 409);
+  const foreign = await call(env, `SLOWLY#WORKSPACE#${randomUUID()}`);
+  assert.equal(foreign.status, 403);
+  assert.equal((await foreign.json()).error.code, "FORBIDDEN");
+  for (const changed of [{ SLOWLY_FORMAL_VIEW_SOURCE_NAMESPACE: "other-source" }, { SLOWLY_FORMAL_VIEW_PLAN: "0".repeat(64) }]) {
+    const conflict = await call({ ...env, ...changed });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error.code, "MIGRATION_NOT_READY");
+  }
   assert.equal(access, 0);
   const result = await call(env); assert.equal(result.status, 200); assert.equal((await result.json()).data.boards.length, 2);
 });
@@ -180,6 +185,33 @@ test("Formal recovery can look up a receipt but cannot resend with expired Cutov
   assert.ok(recoveryCalls.every(call => call.method === "GET"));
   assert.deepEqual(await f.journal.load(), journal);
   assert.equal(reloaded.getSnapshot().uncertainWrite, true);
+});
+
+test("Formal writes recheck authority after awaiting the durable journal claim", async t => {
+  const f = await mainUiFixture();
+  let now = Date.now();
+  const expiresAt = now + 60000;
+  t.mock.method(Date, "now", () => now);
+  const api = { ...f.api, getWorkspaceView: async (...args) => {
+    const view = await f.api.getWorkspaceView(...args);
+    Object.assign(view.readiness.capabilities, { formalCutoverRequired: true, formalCutoverEnabled: true, formalCutoverExpiresAt: expiresAt });
+    return view;
+  } };
+  const journal = { ...f.journal, async claim(item) {
+    await f.journal.claim(item);
+    now = expiresAt;
+  } };
+  const c = controllerFor(f, api, journal);
+  await activate(c, f);
+  c.authorizeWrites(f.workspaceId);
+  const draft = { id: "expires-during-claim", title: "Keep draft", status: "todo" };
+  c.writeDraft("task-editor", draft);
+  await assert.rejects(c.saveTask(draft), { code: "CUTOVER_REQUIRED" });
+  assert.deepEqual(c.readDraft("task-editor"), draft);
+  assert.equal(await f.journal.load(), null);
+  assert.equal(c.getSnapshot().uncertainWrite, false);
+  assert.equal(c.getSnapshot().allowWrites, false);
+  assert.equal(f.calls.filter(call => call.method !== "GET").length, 0);
 });
 
 test("Pending write blocks all scope switches; cancellation persists UNKNOWN for Reload", async () => {
