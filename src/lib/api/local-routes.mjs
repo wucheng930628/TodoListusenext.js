@@ -11,7 +11,7 @@ export function localRoutes(resource) {
     if (controlledBinding()) return (await controlledEnvironment()).repository;
     return (await import("../slowly.mjs")).slowly;
   } });
-  if (resource !== "tasks" && resource !== "boards") return handlers;
+  if (!["tasks", "boards", "widgets"].includes(resource)) return handlers;
   const isolatedWrite = (action, controlledHandler) => async (request, context) => {
     if (process.env.SLOWLY_PHASE5_B1_TABLE) return isolatedTaskRoute(action, request, context);
     if (process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_CONTROLLED_UI_RUN_ID) return controlledHandler(request, context);
@@ -21,6 +21,9 @@ export function localRoutes(resource) {
   if (resource === "boards") return { ...handlers, collectionPost: isolatedWrite("boardPost", handlers.collectionPost),
     itemPatch: isolatedWrite("boardPatch", handlers.itemPatch), itemDelete: isolatedWrite("boardDelete", handlers.itemDelete),
     orderPatch: isolatedWrite("boardOrder", handlers.orderPatch) };
+  if (resource === "widgets") return { ...handlers, collectionPost: isolatedWrite("widgetPost", handlers.collectionPost),
+    itemPatch: isolatedWrite("widgetPatch", handlers.itemPatch), itemDelete: isolatedWrite("widgetDelete", handlers.itemDelete),
+    orderPatch: isolatedWrite("widgetOrder", handlers.orderPatch) };
   return { ...handlers, collectionPost: isolatedWrite("post", handlers.collectionPost),
     itemPatch: isolatedWrite("patch", handlers.itemPatch), itemDelete: isolatedWrite("delete", handlers.itemDelete) };
 }

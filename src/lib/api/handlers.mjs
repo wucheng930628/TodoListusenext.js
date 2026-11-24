@@ -9,6 +9,12 @@ const definitions = {
   widgets: { type: "WIDGET", singular: "Widget", fields: ["id", "type", "span", "height", "manualSize", "config"] },
 };
 const reserved = new Set(["__proto__", "constructor", "prototype", "entityType", "schemaVersion", "version", "createdAt", "updatedAt", "completedAt", "parentId", "workspaceId", "boardId", "gsi1pk", "gsi1sk", "taskCount", "widgetCount", "doingCount"]);
+const widgetConfigFields = new Map([["analytics", []], ["today", ["showCompleted"]], ["upcoming", ["showCompleted"]],
+  ["timer", ["minutes", "taskId", "endsAt", "remaining"]], ["note", ["text"]]]);
+function validateWidgetConfigType(type, config) {
+  const fields = widgetConfigFields.get(type);
+  requireValue(fields && Object.keys(config).every(key => fields.includes(key)), "Widget config does not match its type");
+}
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Vary": "Origin" };
 const codes = { VALIDATION: 400, NOT_FOUND: 404, OWNERSHIP: 403, CONFLICT: 409, OPERATION_CONFLICT: 409, WIP_LIMIT: 409, NOT_EMPTY: 409, FORBIDDEN: 403, NOT_SUPPORTED: 501, MIGRATION_LOCKED: 409 };
 const messages = {
@@ -146,7 +152,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
     if (authorizeMutation) {
       assertId(input.workspaceId, "WORKSPACE");
       key = request.headers.get("idempotency-key");
-      requireValue(resource !== "boards" || action !== "DELETE" || key !== null, "Board deletion requires an operation key");
+      requireValue(!["boards", "widgets"].includes(resource) || action !== "DELETE" || key !== null, "Deletion requires an operation key");
       if (key !== null) assertOperationKey(key);
       authority = await authorizeMutation(input.workspaceId, action);
       requireValue(authority, "Mutation is not authorized", "FORBIDDEN");
@@ -187,6 +193,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
         assertId(input.workspaceId, "WORKSPACE");
         authority = await authorizeCreate(input.workspaceId);
         requireValue(authority, "Create is not authorized", "FORBIDDEN");
+        if (resource === "widgets") validateWidgetConfigType(data.type, data.config);
       }
       const repo = await getRepository(); let item;
       if (operationKey !== null) {
@@ -225,12 +232,16 @@ export function createApi(resource, { getRepository, configuration = () => proce
           const known = new Set(["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
           data.config = { ...Object.fromEntries(Object.entries(previous.data.config || {}).filter(([key]) => !known.has(key))), ...input.data.config };
         }
+        if (resource === "widgets" && authority) {
+          requireValue(data.type === previous.data.type || input.data.config !== undefined, "Changing widget type requires an explicit config");
+          if (input.data.config !== undefined) validateWidgetConfigType(data.type, input.data.config);
+        }
         if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
         let item;
         if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
         else if (resource === "boards") item = await repo.updateBoard(id, data, input.version, authority, operation);
         else if (resource === "tasks") item = await repo.updateTask(input.boardId, id, data, input.version, authority, operation);
-        else item = await repo.updateWidget(input.boardId, id, data, input.version);
+        else item = await repo.updateWidget(input.boardId, id, data, input.version, authority, operation);
         return item;
       });
     }),
@@ -246,7 +257,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
         await assertScope(repo, item, input, true);
         if (resource === "boards") await repo.deleteBoard(id, input.version, authority, operation);
         else if (resource === "tasks") await repo.deleteTask(input.boardId, id, input.version, authority, operation);
-        else await repo.deleteWidget(input.boardId, id, input.version);
+        else await repo.deleteWidget(input.boardId, id, input.version, authority, operation);
         return null;
       });
     }),
@@ -261,6 +272,9 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
       if (resource === "boards" && authorizeMutation) {
         return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo.reorderBoards(parent, input.entries, authority, operation));
+      }
+      if (resource === "widgets" && authorizeMutation) {
+        return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo.reorderWidgets(parent, input.entries, authority, operation));
       }
       const repo = await getRepository();
       if (resource !== "boards") await scopedBoard(repo, parent, input.workspaceId);

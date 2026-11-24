@@ -36,7 +36,8 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
         grant.workspaceId === workspaceId && grant.migrationId === migrationId && grant.planId === migrationId &&
         grant.sourceNamespace === sourceNamespace && Number.isSafeInteger(grant.version) &&
         Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > now() &&
-        (resource === "boards" ? Array.isArray(grant.boardMutations) && (action === null ? grant.boardMutations.length > 0 : grant.boardMutations.includes(action))
+        (resource === "widgets" ? Array.isArray(grant.widgetMutations) && (action === null ? grant.widgetMutations.length > 0 : grant.widgetMutations.includes(action))
+          : resource === "boards" ? Array.isArray(grant.boardMutations) && (action === null ? grant.boardMutations.length > 0 : grant.boardMutations.includes(action))
           : action === "CREATE" || Array.isArray(grant.taskMutations) && grant.taskMutations.includes(action)),
       "Workspace write grant is unavailable", "FORBIDDEN");
     }
@@ -63,14 +64,18 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
   const boards = createApi("boards", { configuration, getRepository,
     authorizeCreate: id => authorizeWrite(id, "CREATE", "boards"),
     authorizeMutation: (id, action) => authorizeWrite(id, action, "boards") });
+  const widgets = createApi("widgets", { configuration, getRepository,
+    authorizeCreate: id => authorizeWrite(id, "CREATE", "widgets"),
+    authorizeMutation: (id, action) => authorizeWrite(id, action, "widgets") });
   return {
     post: tasks.collectionPost, patch: tasks.itemPatch, delete: tasks.itemDelete,
     boardPost: boards.collectionPost, boardPatch: boards.itemPatch, boardDelete: boards.itemDelete, boardOrder: boards.orderPatch,
+    widgetPost: widgets.collectionPost, widgetPatch: widgets.itemPatch, widgetDelete: widgets.itemDelete, widgetOrder: widgets.orderPatch,
     view: createWorkspaceViewApi({ configuration, getRepository, isolation: () => true,
       authorizeRead: authorizeWrite, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
     receipt: createOperationApi({ configuration, getRepository, async authorizeScope(scope) {
-      requireValue(["tasks", "boards"].includes(scope.resource), "Receipt scope is not authorized", "FORBIDDEN");
-      await authorizeWrite(scope.workspaceId, scope.resource === "boards" ? null : "CREATE", scope.resource);
+      requireValue(["tasks", "boards", "widgets"].includes(scope.resource), "Receipt scope is not authorized", "FORBIDDEN");
+      await authorizeWrite(scope.workspaceId, scope.resource === "tasks" ? "CREATE" : null, scope.resource);
     } }),
   };
 }

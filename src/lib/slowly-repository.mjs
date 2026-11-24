@@ -68,7 +68,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return item;
   }
   async function createOnce(resource, input, key, authority) {
-    if (authority) requireValue(["tasks", "boards"].includes(resource) && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
+    if (authority) requireValue(["tasks", "boards", "widgets"].includes(resource) && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
     const operation = createOperation(resource, input, key);
     const data = fromFrontend(operation.type, input.data);
     const replay = receipt => {
@@ -189,9 +189,18 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(!deleting || previous, "Delete requires an existing entity");
     if (authority && previous) {
       requireValue(board.migrationLock !== true && previous.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
-      requireValue(Number.isSafeInteger(board.taskCount) && board.taskCount > 0 && Number.isSafeInteger(board.doingCount) &&
+      if (type === "TASK") requireValue(Number.isSafeInteger(board.taskCount) && board.taskCount > 0 && Number.isSafeInteger(board.doingCount) &&
         board.doingCount >= Number(previous.data.status === "doing") && board.doingCount <= board.taskCount,
       "Board task counters are inconsistent", "CONFLICT");
+    }
+    if (authority && type === "WIDGET") {
+      requireValue(Number.isSafeInteger(board.widgetCount) && board.widgetCount >= Number(Boolean(previous)),
+        "Board widget count is inconsistent", "CONFLICT");
+      if (!previous) {
+        const siblings = await list("WIDGET", boardId);
+        requireValue(siblings.length === board.widgetCount && !siblings.some(widget => widget.data.id === data.id),
+          "Board Widget membership or frontend ID conflicts", "CONFLICT");
+      }
     }
     let item;
     if (!deleting) {
@@ -220,23 +229,26 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(Array.isArray(entries) && entries.length > 0 && entries.length <= (type === "BOARD" ? 99 : 98) && new Set(entries.map(entry => entry.id)).size === entries.length, "Order exceeds atomic capacity (boards: 99; children: 98)");
     const parent = await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parentId);
     if (authority) {
-      requireValue(type === "BOARD" && parentId === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
-      expected(parent, authority.workspaceVersion);
-      requireValue(entries.length <= (operation ? 96 : 97) && new Set(entries.map(entry => entry.position)).size === entries.length,
-        "Invalid or over-capacity Board order");
-      requireValue(entries.length === parent.boardCount, "Board order must include every Board", "CONFLICT");
+      requireValue(type === "BOARD" ? parentId === authority.workspaceId : type === "WIDGET" && parent.workspaceId === authority.workspaceId,
+        "Workspace mismatch", "OWNERSHIP");
+      if (type === "BOARD") expected(parent, authority.workspaceVersion);
+      const maxEntries = (type === "BOARD" ? 97 : 96) - Number(Boolean(operation));
+      requireValue(entries.length <= maxEntries && new Set(entries.map(entry => entry.position)).size === entries.length,
+        "Invalid or over-capacity order");
+      requireValue(entries.length === (type === "BOARD" ? parent.boardCount : parent.widgetCount), "Order must include every item", "CONFLICT");
     }
     const items = await Promise.all(entries.map(async entry => {
       const old = await get(type, entry.id); expected(old, entry.version);
       requireValue(old.parentId === parentId, "Entity belongs to a different parent", "OWNERSHIP");
+      if (authority && type === "WIDGET") requireValue(old.boardId === parentId && old.workspaceId === authority.workspaceId, "Widget scope differs", "OWNERSHIP");
       requireValue(Number.isSafeInteger(entry.position) && entry.position >= 0 && entry.position <= 999999999999, "Invalid position");
       return { old, item: revised(old, { position: entry.position, gsi1sk: `${type}#${String(entry.position).padStart(12, "0")}#${old.id}` }) };
     }));
     if (authority) {
-      const indexed = await list("BOARD", parentId);
+      const indexed = await list(type, parentId);
       const submitted = new Set(entries.map(entry => entry.id));
       requireValue(indexed.length === entries.length && indexed.every(board => submitted.has(board.id)),
-        "Workspace Board membership changed; refresh before ordering", "CONFLICT");
+        "Order membership changed; refresh before ordering", "CONFLICT");
     }
     const result = items.map(({ item }) => item);
     const actions = [...items.map(({ old, item }) => put(item, old)), put(revised(parent, {}), parent)];
@@ -258,10 +270,10 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
       return childChange("TASK", boardId, id, { ...task.data, status, urgent }, version);
     },
     createWidget: (boardId, data, position) => childChange("WIDGET", boardId, null, data, null, position),
-    updateWidget: (boardId, id, data, version) => childChange("WIDGET", boardId, id, data, version),
-    deleteWidget: (boardId, id, version) => childChange("WIDGET", boardId, id, null, version),
+    updateWidget: (boardId, id, data, version, authority, operation) => childChange("WIDGET", boardId, id, data, version, undefined, false, operation, authority),
+    deleteWidget: (boardId, id, version, authority, operation) => childChange("WIDGET", boardId, id, null, version, undefined, false, operation, authority),
     reorderBoards: (id, entries, authority, operation) => reorder("BOARD", id, entries, authority, operation),
     reorderTasks: (id, entries) => reorder("TASK", id, entries),
-    reorderWidgets: (id, entries) => reorder("WIDGET", id, entries),
+    reorderWidgets: (id, entries, authority, operation) => reorder("WIDGET", id, entries, authority, operation),
   };
 }
