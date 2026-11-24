@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CreateTableCommand, DeleteTableCommand, DescribeTableCommand, waitUntilTableExists, waitUntilTableNotExists } from "@aws-sdk/client-dynamodb";
@@ -23,12 +24,37 @@ const reportPath = resolve(directory, `${runId}.json`);
 const report = { runId, endpoint: "http://127.0.0.1:9000", testTable: tableName, created: false, cases: [], migrations: [], startedAt: new Date().toISOString() };
 const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2));
 save(); let failure; let beforeTransaction; let afterTransaction;
+const traceContext = new AsyncLocalStorage();
+let afterRead;
+const traceItem = item => item && Object.fromEntries(["id", "entityType", "version", "managedVersion", "managedHash", "migrationId",
+  "migrationLock", "migrationOwner", "state", "lockState", "releasedAt", "releasedCount", "confirmedCount", "taskCount", "widgetCount"]
+  .filter(key => Object.hasOwn(item, key)).map(key => [key, item[key]]));
+const expectedVersion = put => {
+  const alias = Object.keys(put.ExpressionAttributeNames ?? {}).find(key => put.ExpressionAttributeNames[key] === "version");
+  return alias && put.ExpressionAttributeValues?.[`:${alias.slice(1)}`];
+};
 const db = { async send(command) {
   const input = command.input;
-  const names = input.TransactItems ? input.TransactItems.map(item => (item.Put || item.Delete || item.Update || item.ConditionCheck).TableName) : [input.TableName];
+  const names = input.TransactItems ? input.TransactItems.map(item => (item.Get || item.Put || item.Delete || item.Update || item.ConditionCheck).TableName) : [input.TableName];
   assert.ok(names.every(name => name === tableName), "Refusing any write/test operation outside the dedicated table");
   if (command instanceof TransactWriteCommand && beforeTransaction) await beforeTransaction(input);
-  const response = await document.send(command);
+  const context = traceContext.getStore();
+  const event = context && { ...context, startedAt: new Date().toISOString(), command: command.constructor.name,
+    keys: input.TransactItems?.map(item => item.Get?.Key.id ?? item.Put?.Item.id ?? item.Delete?.Key.id ?? item.ConditionCheck?.Key.id) ?? [input.Key?.id],
+    writes: input.TransactItems?.flatMap(item => item.Put ? [{ ...traceItem(item.Put.Item), expectedVersion: expectedVersion(item.Put),
+      condition: item.Put.ConditionExpression }] : []) };
+  if (event) report.concurrentTrace.push(event);
+  let response;
+  try {
+    response = await document.send(command);
+    if (event) Object.assign(event, { finishedAt: new Date().toISOString(), dynamodbRequestId: response.$metadata?.requestId,
+      read: response.Responses?.map(result => traceItem(result.Item)) ?? traceItem(response.Item) });
+  } catch (error) {
+    if (event) Object.assign(event, { finishedAt: new Date().toISOString(), dynamodbRequestId: error.$metadata?.requestId,
+      error: { name: error.name, code: error.code, message: error.message, stack: error.stack } });
+    throw error;
+  }
+  if (context && afterRead) await afterRead(command, context, response);
   if (command instanceof TransactWriteCommand && afterTransaction) await afterTransaction(input);
   return response;
 } };
@@ -43,7 +69,7 @@ const get = async id => (await db.send(new GetCommand({ TableName: tableName, Ke
 async function check(name, action) {
   const item = { name, startedAt: new Date().toISOString() }; report.cases.push(item); save();
   try { await action(); item.passed = true; }
-  catch (error) { item.passed = false; item.error = { name: error.name, code: error.code, message: error.message, causeName: error.cause?.name, causeMessage: error.cause?.message }; throw error; }
+  catch (error) { item.passed = false; item.error = { name: error.name, code: error.code, message: error.message, stack: error.stack, causeName: error.cause?.name, causeMessage: error.cause?.message }; throw error; }
   finally { save(); }
 }
 function fixture(label, data = workspaceFixture(), registrationBudget = 32) {
@@ -106,7 +132,36 @@ try {
   });
   await check("Concurrent sibling operations serialize parent versions correctly", async () => {
     const children = happy.plan.operations.filter(op => op.parentId === board.targetId);
-    await Promise.all(children.map(op => happy.service.execute(happy.plan.migrationId, op.operationId, op.fingerprint)));
+    report.concurrentTrace = [];
+    const runChild = op => traceContext.run({ requestId: randomUUID(), operationId: op.operationId, migrationId: happy.plan.migrationId },
+      () => happy.service.execute(happy.plan.migrationId, op.operationId, op.fingerprint));
+    if (process.argv.includes("--force-parent-overlap")) {
+      const observed = Promise.withResolvers();
+      const committed = Promise.withResolvers();
+      const paused = children[0];
+      let interrupted = false;
+      afterRead = async (command, context, response) => {
+        const rows = response.Responses?.map(result => result.Item) ?? [response.Item];
+        if (interrupted || context.operationId !== paused.operationId ||
+          !rows.some(row => row?.entityType === "MIGRATION_OPERATION" && row.operation?.operationId === board.operationId)) return;
+        interrupted = true;
+        observed.resolve();
+        await committed.promise;
+      };
+      const pending = runChild(paused).finally(() => observed.resolve());
+      const siblings = observed.promise.then(async () => {
+        assert.ok(interrupted, "Execution did not read the parent receipt");
+        return runChild(children[1]);
+      }).finally(() => committed.resolve());
+      try {
+        const results = await Promise.allSettled([pending, siblings]);
+        for (const result of results) if (result.status === "rejected") throw result.reason;
+        await Promise.all(children.slice(2).map(runChild));
+      } finally { afterRead = undefined; }
+    } else {
+      const results = await Promise.allSettled(children.map(runChild));
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    }
     const parent = await get(board.targetId); assert.equal(parent.taskCount, 2); assert.equal(parent.widgetCount, 2);
   });
   await check("External parent version conflict refuses child creation", async () => {
@@ -175,6 +230,7 @@ finally {
     catch (error) { failure ||= error; report.originalVerificationError = { name: error.name, message: error.message }; }
   }
   report.success = !failure; report.finishedAt = new Date().toISOString(); save(); client.destroy();
-  console.log(JSON.stringify({ ...report, originalBefore: report.originalBefore ? { itemCount: Object.keys(report.originalBefore).length } : undefined, migrations: undefined, reportPath }));
+  console.log(JSON.stringify({ ...report, originalBefore: report.originalBefore ? { itemCount: Object.keys(report.originalBefore).length } : undefined,
+    migrations: undefined, concurrentTrace: undefined, concurrentTraceEvents: report.concurrentTrace?.length, reportPath }));
 }
 if (failure) process.exitCode = 1;

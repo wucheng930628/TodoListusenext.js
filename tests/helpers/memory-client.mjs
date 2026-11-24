@@ -26,6 +26,7 @@ export class MemoryClient {
     const input = structuredClone(command.input); const type = command.constructor.name;
     this.calls.push({ type, input });
     if (type === "GetCommand") return { Item: structuredClone(this.items.get(input.Key.id)) };
+    if (type === "TransactGetCommand") return { Responses: input.TransactItems.map(({ Get }) => ({ Item: structuredClone(this.items.get(Get.Key.id)) })) };
     if (type === "QueryCommand") {
       const all = [...this.items.values()].filter(item => item.gsi1pk === input.ExpressionAttributeValues[":parent"] && item.gsi1sk.startsWith(input.ExpressionAttributeValues[":type"])).sort((a, b) => a.gsi1sk.localeCompare(b.gsi1sk));
       const start = input.ExclusiveStartKey ? all.findIndex(item => item.id === input.ExclusiveStartKey.id) + 1 : 0;

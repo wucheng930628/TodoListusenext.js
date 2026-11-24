@@ -110,7 +110,7 @@ export function boundDryRunClient(db, tableName, runId) {
   assertDryRunTable(tableName, runId);
   return { send(command) {
     const input = command.input;
-    const tables = input.TransactItems ? input.TransactItems.map(action => (action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
+    const tables = input.TransactItems ? input.TransactItems.map(action => (action.Get || action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
     requireValue(tables.length > 0 && tables.every(name => name === tableName), "Dry-run table boundary violated", "DRY_RUN_SCOPE");
     return db.send(command);
   } };

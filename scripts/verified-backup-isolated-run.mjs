@@ -60,7 +60,7 @@ try {
   client.middlewareStack.add((next, context) => async request => {
     if (context.commandName !== "ListTablesCommand") {
       const input = request.input;
-      const tables = input.TransactItems ? input.TransactItems.map(action => (action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
+      const tables = input.TransactItems ? input.TransactItems.map(action => (action.Get || action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
       check(tables.length > 0 && tables.every(name => name === tableName && name !== "SlowlyTasks"), "DATABASE_SCOPE_VIOLATION");
       tables.forEach(name => databaseTables.add(name));
     }

@@ -30,7 +30,7 @@ const report = { runId, tableName, endpoint: "http://127.0.0.1:9000", created: f
 const path = `.phase4c1-test-runs/${runId}.json`; const save = () => writeFileSync(path, JSON.stringify(report, null, 2)); save();
 let beforeTransaction; let afterTransaction; let original; let host; let transactions = 0;
 const db = { async send(command) {
-  const input = command.input; const names = input.TransactItems ? input.TransactItems.map(action => (action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
+  const input = command.input; const names = input.TransactItems ? input.TransactItems.map(action => (action.Get || action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
   assert.ok(names.every(name => name === tableName), "No test operation may target another table");
   if (command instanceof TransactWriteCommand) { transactions++; if (beforeTransaction) await beforeTransaction(input); }
   const response = await document.send(command);

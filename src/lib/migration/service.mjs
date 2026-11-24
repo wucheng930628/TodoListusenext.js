@@ -15,12 +15,12 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
   const store = migrationStore(db, tableName);
   const revise = (item, changes) => ({ ...item, ...changes, version: item.version + 1, updatedAt: clock() });
   const control = (id, entityType, fields, now = clock()) => ({ id, entityType, schemaVersion: 1, version: 1, createdAt: now, updatedAt: now, ...fields });
-  async function getControl(id, entityType) {
-    const item = await store.get(id);
+  function validateControl(item, entityType) {
     requireValue(item?.entityType === entityType, "Migration resource not found", "NOT_FOUND");
     requireValue(item.schemaVersion === 1 && Number.isSafeInteger(item.version) && item.version >= 1, "Unsupported control schema", "UNSUPPORTED_SCHEMA");
     return item;
   }
+  const getControl = async (id, entityType) => validateControl(await store.get(id), entityType);
   async function getSession(id) {
     validHash(id); const session = await getControl(sessionKey(id), "MIGRATION_SESSION");
     requireValue(session.planFormatVersion === 2 && session.targetSchemaVersion === 1, "Unsupported session schema", "UNSUPPORTED_SCHEMA");
@@ -47,6 +47,10 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
   async function getOperation(id, op) {
     validHash(op); const session = await getSession(id);
     const receipt = await getControl(operationKey(id, op), "MIGRATION_OPERATION");
+    return validateOperation(session, op, receipt);
+  }
+  async function validateOperation(session, op, receipt) {
+    const id = session.migrationId;
     requireValue(receipt.migrationId === id && receipt.operation.operationId === op && operationFingerprint(receipt.operation) === receipt.operation.fingerprint && hash([id, receipt.operation.key]) === op, "Operation integrity mismatch", "INTEGRITY_CONFLICT");
     const manifest = await getControl(manifestKey(id, receipt.index), "MIGRATION_MANIFEST");
     requireValue(manifest.migrationId === id && hash(manifest.header) === hash(header(receipt.operation)), "Manifest mismatch", "INTEGRITY_CONFLICT");
@@ -80,11 +84,11 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
     if (operation.type === "WORKSPACE") item.boardCount = 0;
     assertItemSize(item); return item;
   }
-  async function ownedTarget(receipt, locked = true) {
-    const item = await store.get(receipt.operation.targetId);
+  function validateOwnedTarget(receipt, item, locked) {
     requireValue(item && item.schemaVersion === 1 && item.migrationLock === locked && item.migrationOwner?.migrationId === receipt.migrationId && item.migrationOwner?.operationId === receipt.operation.operationId && item.version === receipt.managedVersion && hash(item) === receipt.managedHash, "Target ownership, content or version changed", "INTEGRITY_CONFLICT");
     return item;
   }
+  const ownedTarget = async (receipt, locked = true) => validateOwnedTarget(receipt, await store.get(receipt.operation.targetId), locked);
   async function createSession(backup, options, expectedPlanId) {
     const plan = migrationPlanV2(backup, options);
     requireValue(expectedPlanId === plan.planId, "Reviewed plan changed", "PLAN_CONFLICT");
@@ -135,12 +139,16 @@ export function createMigrationService(db, { tableName = "SlowlyTasks", clock = 
   }
   async function parentChanges(receipt, session, delta) {
     if (!receipt.operation.parentId) return [];
-    const parent = await store.get(receipt.operation.parentId);
-    requireValue(parent?.migrationOwner?.migrationId === session.migrationId, "Parent belongs to another session", "INTEGRITY_CONFLICT");
-    const parentReceipt = await getOperation(session.migrationId, parent.migrationOwner.operationId);
+    const parentId = receipt.operation.parentId;
+    const owner = (await store.get(parentId))?.migrationOwner;
+    requireValue(owner?.migrationId === session.migrationId, "Parent belongs to another session", "INTEGRITY_CONFLICT");
+    validHash(owner.operationId);
+    // Read both sides of the managed-version invariant from one committed snapshot.
+    const [parent, rawParentReceipt] = await store.getPair(parentId, operationKey(session.migrationId, owner.operationId));
+    const parentReceipt = await validateOperation(session, owner.operationId, validateControl(rawParentReceipt, "MIGRATION_OPERATION"));
     requireValue(parentReceipt.state === "CONFIRMED" && parentReceipt.operation.targetId === receipt.operation.parentId &&
-      ((receipt.operation.type === "BOARD" && parent.entityType === "WORKSPACE") || (["TASK", "WIDGET"].includes(receipt.operation.type) && parent.entityType === "BOARD")), "Parent is not confirmed", "DEPENDENCY_CONFLICT");
-    await ownedTarget(parentReceipt);
+      ((receipt.operation.type === "BOARD" && parent?.entityType === "WORKSPACE") || (["TASK", "WIDGET"].includes(receipt.operation.type) && parent?.entityType === "BOARD")), "Parent is not confirmed", "DEPENDENCY_CONFLICT");
+    validateOwnedTarget(parentReceipt, parent, true);
     const changes = {};
     if (receipt.operation.type === "BOARD") {
       requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount + delta >= 0, "Workspace count metadata requires review", "INTEGRITY_CONFLICT");

@@ -120,7 +120,7 @@ async function main() {
     client = new DynamoDBClient({ endpoint: "http://127.0.0.1:9000", region: "ap-northeast-1", credentials: { accessKeyId: "local", secretAccessKey: "local" }, maxAttempts: 2 });
     client.middlewareStack.add(next => async request => {
       const input = request.input;
-      const tables = input.TransactItems ? input.TransactItems.map(action => (action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
+      const tables = input.TransactItems ? input.TransactItems.map(action => (action.Get || action.Put || action.Delete || action.ConditionCheck || action.Update).TableName) : [input.TableName];
       requireValue(tables.length > 0 && tables.every(name => name === state.tableName), "Database request outside owned dry-run table", "DRY_RUN_SCOPE");
       return next(request);
     }, { step: "initialize", name: "dryRunTableBoundary" });

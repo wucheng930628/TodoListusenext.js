@@ -1,9 +1,23 @@
 import "server-only";
-import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactGetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { DataError, requireValue, assertItemSize } from "../data-model.mjs";
 
 export function migrationStore(db, tableName = "SlowlyTasks") {
   const get = async id => (await db.send(new GetCommand({ TableName: tableName, Key: { id }, ConsistentRead: true }))).Item;
+  const concurrent = error => ["ConditionalCheckFailedException", "TransactionConflictException"].includes(error.name) ||
+    (error.name === "TransactionCanceledException" && error.CancellationReasons?.some(reason => ["ConditionalCheckFailed", "TransactionConflict"].includes(reason.Code)));
+  async function getPair(first, second) {
+    try {
+      const { Responses } = await db.send(new TransactGetCommand({
+        TransactItems: [first, second].map(id => ({ Get: { TableName: tableName, Key: { id } } })),
+      }));
+      requireValue(Responses?.length === 2, "Incomplete migration snapshot", "STORAGE");
+      return Responses.map(response => response.Item);
+    } catch (error) {
+      if (concurrent(error)) throw new DataError("CONFLICT", "Concurrent state change", { cause: error });
+      throw new DataError("STORAGE", "Migration snapshot read failed", { cause: error });
+    }
+  }
   function condition(previous, target = false) {
     if (!previous) return { ConditionExpression: "attribute_not_exists(id)" };
     const names = {}; const values = {}; const clauses = [];
@@ -26,9 +40,9 @@ export function migrationStore(db, tableName = "SlowlyTasks") {
     try { await db.send(new TransactWriteCommand({ TransactItems: actions })); }
     catch (error) {
       if (error.name === "ValidationException") throw new DataError("FAILED_WRITE", "Transaction rejected before commit", { cause: error });
-      if (["ConditionalCheckFailedException", "TransactionConflictException"].includes(error.name) || (error.name === "TransactionCanceledException" && error.CancellationReasons?.some(reason => ["ConditionalCheckFailed", "TransactionConflict"].includes(reason.Code)))) throw new DataError("CONFLICT", "Concurrent state change", { cause: error });
+      if (concurrent(error)) throw new DataError("CONFLICT", "Concurrent state change", { cause: error });
       throw new DataError("STORAGE", "Migration storage failed", { cause: error });
     }
   }
-  return { get, put, remove, check, transact };
+  return { get, getPair, put, remove, check, transact };
 }
