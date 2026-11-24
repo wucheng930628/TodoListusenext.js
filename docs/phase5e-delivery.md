@@ -120,9 +120,9 @@ Phase 4 隔離整合紀錄為 Controlled UI 6/6、Release 13/13、Main UI／Safe
 
 - 正式 `SlowlyTasks` 與 `SlowlyByParent` 均為 ACTIVE。35 筆項目的內容指紋與修正後回歸的正式表快照一致，未發現資料庫端 Pending 或 UNKNOWN 控制紀錄。DynamoDB 交易採原子提交，驗收紀錄沒有未確認或部分提交的測試寫入。
 - 正式 Workspace View 的 `formalRuntimeWritesEnabled` 維持 false。本輪未執行正式 Migration、Release、Cutover 或授權核發，未寫入正式資料或修改原始備份及使用者 Chrome 儲存。原始備份未重新讀取驗證。使用者 Chrome 的 Pending、UNKNOWN 與 Recovery Journal 未重新查驗。
-- 查到一張早期殘留隔離表 `Slowly_Phase4B2_29e6a829aa864fa98906b0af3718411b`。舊報告為 `.phase4b2-test-runs/29e6a829-aa86-4fa9-8906-b0af3718411b.json`，記載當時無法確認測試伺服器停止，因此保留該表。現有 7 筆，包括 3 個 Workspace、3 個 Board、1 個測試控制記錄，沒有 Pending 或 UNKNOWN。本輪維持唯讀，待確認表的擁有流程與清理授權。
+- 早期隔離表 `Slowly_Phase4B2_29e6a829aa864fa98906b0af3718411b` 的 7 筆資料已完成清理。已用舊報告、fixture 控制記錄及正式表的唯讀對照核對歸屬。3 個 Workspace、3 個 Board 和 1 個測試控制記錄已先備份並驗證內容雜湊，再用一筆條件式交易刪除。強一致讀取確認筆數由 7 降為 0，表仍為 ACTIVE，正式表指紋一致。清理清單、備份與驗證紀錄存於 `.phase4b2-test-runs/` 下該次執行的 `item-cleanup-76284bbf-a33d-4784-833e-e02b21125fbf` 檔案組。Controlled UI 6/6 通過，實際空表也驗證缺少 fixture proof 時會拒絕授權。
 
-Phase 4 回歸已通過，遷移並行問題已結案。Phase 5-E 最終交付仍有舊隔離表清理待確認，正式瀏覽器的即時狀態也待人工驗收。完整 ESLint 的 3 項既有錯誤列為技術債，規則與結果維持原樣。依上述證據，本次稽核結論為 `PHASE5_E_COMPLETE: false` 與 `PHASE5_READY: false`。
+Phase 4 回歸已通過，遷移並行問題已結案。舊隔離表清理已完成，正式瀏覽器的即時狀態仍待人工驗收。完整 ESLint 的 3 項既有錯誤列為技術債，規則與結果維持原樣。目前 `PHASE5_E_COMPLETE: false` 與 `PHASE5_READY: false`。
 
 ## 重跑隔離驗收
 
