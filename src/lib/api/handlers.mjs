@@ -41,25 +41,30 @@ export function query(request, allowed) {
   for (const key of params.keys()) requireValue(allowed.includes(key) && params.getAll(key).length === 1, "Unknown or duplicate query parameter");
   return Object.fromEntries(params);
 }
-export function guard(request, env) {
+export function guard(request, env, { formalView = false } = {}) {
   const url = new URL(request.url);
   const origin = env.SLOWLY_LOCAL_API_ORIGIN || "http://127.0.0.1:3000";
   const configured = new URL(origin);
+  const host = request.headers.get("host");
+  // Only the formal Workspace GET may use the original browser storage origin.
+  const localhost = formalView && request.method === "GET" && env.SLOWLY_FORMAL_VIEW_ENABLED === "1" &&
+    host === configured.host.replace(/^127\.0\.0\.1(?=:|$)/, "localhost");
+  const expectedHost = localhost ? host : configured.host;
+  const expectedOrigin = localhost ? `http://${expectedHost}` : origin;
   requireValue(env.NODE_ENV === "development" && env.SLOWLY_LOCAL_API === "1" &&
     configured.protocol === "http:" && configured.hostname === "127.0.0.1" && configured.origin === origin &&
-    // Next dev may normalize Request.url to localhost; the original Host must
-    // still exactly match the configured 127.0.0.1 origin.
+    // Next dev may normalize Request.url; the original Host selects the exact origin.
     url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && url.port === configured.port &&
-    request.headers.get("host") === configured.host, "Local API disabled", "FORBIDDEN");
+    host === expectedHost, "Local API disabled", "FORBIDDEN");
   const forwardedHost = request.headers.get("x-forwarded-host");
   const forwardedProto = request.headers.get("x-forwarded-proto");
   const forwardedFor = request.headers.get("x-forwarded-for");
-  requireValue(!request.headers.has("forwarded") && (!forwardedHost || forwardedHost === configured.host) &&
+  requireValue(!request.headers.has("forwarded") && (!forwardedHost || forwardedHost === expectedHost) &&
     (!forwardedProto || forwardedProto === "http") && (!forwardedFor || forwardedFor.split(",").every(ip => ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip.trim()))), "Proxy requests are not allowed", "FORBIDDEN");
   const suppliedOrigin = request.headers.get("origin");
   requireValue(!["cross-site", "same-site"].includes(request.headers.get("sec-fetch-site")) &&
-    (!suppliedOrigin || suppliedOrigin === origin), "Cross-origin requests are not allowed", "FORBIDDEN");
-  if (!["GET", "HEAD"].includes(request.method)) requireValue(suppliedOrigin === origin, "An exact local Origin is required", "FORBIDDEN");
+    (!suppliedOrigin || suppliedOrigin === expectedOrigin), "Cross-origin requests are not allowed", "FORBIDDEN");
+  if (!["GET", "HEAD"].includes(request.method)) requireValue(suppliedOrigin === expectedOrigin, "An exact local Origin is required", "FORBIDDEN");
 }
 export async function body(request, maxBytes = 200000, sizeErrorCode = "VALIDATION") {
   requireValue(request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() === "application/json", "JSON content type required");

@@ -4,6 +4,25 @@ import { evidenceFixture } from "./helpers/evidence-fixture.mjs";
 import { authorizationFixture, runAuthorizationScenario } from "./helpers/cutover-authorization-scenario.mjs";
 import { authorizationEvidenceId } from "../src/lib/migration/cutover-authorization.mjs";
 
+test("formal localhost GET uses exact loopback headers and preserves scope and Evidence enforcement", async () => {
+  const a = await authorizationFixture(await evidenceFixture());
+  const localhost = { host: "localhost:3000" };
+  assert.equal((await a.view(a.preparation, localhost)).formalCutoverEnabled, false);
+  assert.equal((await a.view(a.preparation, localhost)).formalRuntimeWritesEnabled, false);
+  for (const request of [
+    { host: "localhost.evil:3000" }, { host: "localhost:3001" }, { port: "3001" },
+    { headers: { origin: "http://127.0.0.1:3000" } }, { headers: { "sec-fetch-site": "same-site" } },
+    { headers: { "x-forwarded-host": "127.0.0.1:3000" } }, { headers: { "x-forwarded-for": "192.0.2.1" } },
+    { headers: { forwarded: "host=localhost:3000" } }, { method: "POST" }, { formalEnabled: "0" },
+    { id: "SLOWLY#WORKSPACE#00000000-0000-0000-0000-000000000000" },
+  ]) assert.equal((await a.getView(a.preparation, { ...localhost, ...request })).status, 403);
+  assert.equal((await a.getView(a.preparation, { ...localhost, scope: { ...a.binding, migrationId: "0".repeat(64) } })).status, 409);
+  assert.equal((await a.getView(a.preparation, { ...localhost, scope: { ...a.binding, sourceNamespace: "wrong-source" } })).status, 409);
+  assert.equal((await a.view({ ...a.preparation, signature: "0".repeat(64) }, localhost)).formalCutoverEnabled, false);
+  a.setTime(a.preparation.payload.expiresAt);
+  assert.equal((await a.view(a.preparation, localhost)).formalCutoverEnabled, false);
+});
+
 test("approval, isolated concurrent redemption, fresh provider lookup and revocation", async () => {
   await runAuthorizationScenario(await evidenceFixture());
 });

@@ -34,15 +34,20 @@ export async function authorizationFixture(f, lifetimeMs = 60000) {
   const lifecycle = () => createCutoverAuthorization({ ...deps, verify });
   const provider = (bundle = signed) => createTrustedEvidenceProvider({ ...deps, loadBundle: async () => bundle, redeemedUntil: lifecycle().redeemedUntil });
   const gate = bundle => provider(bundle)(binding);
-  const view = async bundle => {
-    const get = createWorkspaceViewApi({ configuration: () => ({ NODE_ENV: "development", SLOWLY_LOCAL_API: "1" }),
-      authorizeWorkspace: () => binding, getRepository: () => f.repository, getMigrationService: () => f.service, cutoverReadiness: provider(bundle) });
-    const response = await get(new Request(`http://127.0.0.1:3000/api/workspaces/${encodeURIComponent(binding.workspaceId)}/view`,
-      { headers: { host: "127.0.0.1:3000" } }), { params: { id: binding.workspaceId } });
+  const getView = (bundle, { host = "127.0.0.1:3000", port = "3000", headers = {}, method = "GET", id = binding.workspaceId,
+    scope = binding, formalEnabled = "1" } = {}) => {
+    const get = createWorkspaceViewApi({ configuration: () => ({ NODE_ENV: "development", SLOWLY_LOCAL_API: "1", SLOWLY_FORMAL_VIEW_ENABLED: formalEnabled }),
+      authorizeWorkspace: workspaceId => workspaceId === binding.workspaceId ? scope : null,
+      getRepository: () => f.repository, getMigrationService: () => f.service, cutoverReadiness: provider(bundle) });
+    return get(new Request(`http://localhost:${port}/api/workspaces/${encodeURIComponent(id)}/view`,
+      { method, headers: { host, ...headers } }), { params: { id } });
+  };
+  const view = async (bundle, request) => {
+    const response = await getView(bundle, request);
     assert.equal(response.status, 200);
     return (await response.json()).data.readiness.capabilities;
   };
-  return { signed, execution, sign, binding, lifecycle, gate, view, preparation, setTime: value => { time = value; },
+  return { signed, execution, sign, binding, lifecycle, gate, view, getView, preparation, setTime: value => { time = value; },
     input: { binding, signed, confirmation: authorizationEvidenceId(signed.payload) } };
 }
 
@@ -77,6 +82,7 @@ export async function runAuthorizationScenario(f) {
   wrongExecution.attestations.approval.requestEvidenceId = "0".repeat(64);
   assert.deepEqual((await a.gate(a.sign(wrongExecution))).blockers, ["CUTOVER_EXECUTION_CONFIRMATION_REQUIRED"]);
   assert.equal((await a.view(execution)).formalCutoverEnabled, true);
+  assert.equal((await a.view(execution, { host: "localhost:3000", headers: { origin: "http://localhost:3000", "x-forwarded-host": "localhost:3000" } })).formalCutoverEnabled, true);
   await assert.rejects(store.transition("redeem", a.input), { code: "CUTOVER_AUTHORIZATION_STATE" });
   assert.equal((await store.transition("revoke", a.input)).state, "REVOKED");
   assert.equal((await a.gate(execution)).cutoverEnabled, false);
