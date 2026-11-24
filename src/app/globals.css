@@ -3,7 +3,8 @@
   --ink:#354035;
   --green:#486c50;
   --muted:#90968a;
-  --line:#e5e8df
+  --line:#e5e8df;
+  --workspace-sidebar-width:218px
 }
 * {
   box-sizing:border-box
@@ -38,7 +39,7 @@ a {
   display:flex
 }
 aside {
-  width:218px;
+  width:var(--workspace-sidebar-width);
   position:fixed;
   inset:0 auto 0 0;
   background:#f2f4ed;
@@ -230,9 +231,57 @@ button:disabled {
   margin-top:4px
 }
 main {
-  margin-left:218px;
+  margin-left:var(--workspace-sidebar-width);
   min-width:0;
   flex:1
+}
+.source-controls {
+  margin-left:var(--workspace-sidebar-width);
+  padding:12px 20px;
+  border-bottom:1px solid var(--line);
+  background:#f3f5ee;
+}
+.source-controls summary {
+  cursor:pointer;
+  font-weight:650;
+}
+.source-controls p {
+  margin:8px 0;
+}
+.source-controls form {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:flex-end;
+  gap:8px 12px;
+  margin:10px 0;
+}
+.source-controls form label {
+  display:flex;
+  flex-direction:row;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:6px;
+  min-width:0;
+  margin:0;
+}
+.source-controls form label:has(input:not([type=checkbox])) {
+  flex:1 1 320px;
+  max-width:520px;
+}
+.source-controls form input:not([type=checkbox]) {
+  flex:1 1 230px;
+  min-width:0;
+}
+.source-controls input[type=checkbox] {
+  width:auto;
+  accent-color:var(--green);
+}
+.source-controls button {
+  padding:6px 10px;
+  margin:2px 4px 2px 0;
+  border:1px solid #dce5d5;
+  border-radius:6px;
+  background:#fbfcf8;
 }
 .topbar {
   height:72px;
@@ -882,13 +931,12 @@ form textarea {
 
 }
 @media(max-width:1100px) {
+  :root {
+    --workspace-sidebar-width:178px
+  }
   aside {
-    width:178px;
     padding-left:17px;
     padding-right:17px
-  }
-  main {
-    margin-left:178px
   }
   .content {
     padding:30px 24px
@@ -926,6 +974,9 @@ form textarea {
 
 }
 @media(max-width:800px) {
+  :root {
+    --workspace-sidebar-width:68px
+  }
   .board-nav,.new-board {
     display:none;
   }
@@ -944,7 +995,6 @@ form textarea {
     padding:10px;
   }
   aside {
-    width:68px;
     padding:23px 16px
   }
   .brand {
@@ -955,9 +1005,6 @@ form textarea {
   }
   .workspace,.active-nav,.sidebar-note,.profile {
     display:none
-  }
-  main {
-    margin-left:68px
   }
   .topbar {
     height:60px
@@ -988,6 +1035,9 @@ form textarea {
 
 }
 @media(max-width:520px) {
+  :root {
+    --workspace-sidebar-width:0px
+  }
   .page-heading {
     flex-wrap:wrap;
   }
@@ -997,9 +1047,6 @@ form textarea {
   }
   aside {
     display:none
-  }
-  main {
-    margin-left:0
   }
   .content {
     padding:25px 16px

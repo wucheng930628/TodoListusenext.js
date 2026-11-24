@@ -30,7 +30,7 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
     } catch (error) { setMessage(error.message); }
   }
   return <>
-    {options.development && <section aria-label="資料來源控制" style={{ padding: "8px 20px", borderBottom: "1px solid #dce5d5", background: "#f3f5ee" }}>
+    {options.development && <section aria-label="資料來源控制" className="source-controls">
       <details><summary>資料來源：{state.mode === "api" ? "API" : "localStorage"}（開發模式）</summary>
         <p>API 需由伺服器明確綁定 Workspace，並通過 Readiness。切換不會自動匯入或合併資料。</p>
         <button type="button" onClick={() => void attempt(async () => { const record = await controller.inspectRecovery(); if (record) { setWorkspaceId(record.workspaceId); setMessage("找到未確認操作，請明確啟用原 Workspace 的唯讀模式以恢復。未恢復前不允許新寫入。"); } else setMessage("沒有未確認操作。請明確選擇 Workspace。"); })}>檢查 Reload 恢復紀錄</button>
