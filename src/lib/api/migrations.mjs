@@ -104,8 +104,8 @@ export function createMigrationApi({ getService, configuration = () => process.e
   };
 }
 export const localMigrationRoutes = () => createMigrationApi({
-  // A controlled UI server must never route a migration to the ordinary table.
-  configuration: () => process.env.SLOWLY_CONTROLLED_UI_RUN_ID || process.env.SLOWLY_CONTROLLED_UI_TABLE
+  // An isolated server must never route a migration to the ordinary table.
+  configuration: () => process.env.SLOWLY_CONTROLLED_UI_RUN_ID || process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_PHASE5_B1_TABLE
     ? { ...process.env, SLOWLY_LOCAL_API: "0" } : process.env,
   getService: async () => (await import("../migration/index.mjs")).migrations,
 });

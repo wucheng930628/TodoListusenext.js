@@ -59,12 +59,13 @@ export async function readWorkspaceView(repository, workspaceId, { migrationServ
   return snapshot;
 }
 
-export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false, authorizeWorkspace, cutoverReadiness }) {
+export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false, authorizeWorkspace, authorizeRead, cutoverReadiness }) {
   return async (request, context) => {
     try {
       const isolated = isolation() === true;
       guard(request, configuration(), { formalView: !isolated }); query(request, []); const { id } = await context.params;
       assertApiId(id, "WORKSPACE");
+      if (authorizeRead) await authorizeRead(id);
       const binding = isolated ? null : authorizeWorkspace?.(id);
       requireValue(isolated || binding?.workspaceId === id, "Workspace view is not authorized", "FORBIDDEN");
       const migrationService = getMigrationService ? await getMigrationService() : undefined;

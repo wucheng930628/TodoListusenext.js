@@ -5,6 +5,8 @@ import { migrationStore } from "../migration/store.mjs";
 import { assertReleaseBinding } from "./formal-workspace.mjs";
 import { createApi } from "./handlers.mjs";
 import { createOperationApi } from "./operations.mjs";
+import { createWorkspaceViewApi } from "./workspace-view.mjs";
+import { createMigrationService } from "../migration/service.mjs";
 
 export function isolatedTaskCreateRoutes({ db, configuration = () => process.env, now = Date.now }) {
   const env = configuration();
@@ -14,7 +16,7 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
   const sourceNamespace = env.SLOWLY_PHASE5_B1_SOURCE_NAMESPACE;
   const restricted = { send(command) {
     const tables = command.input.TransactItems?.map(action => (action.Put || action.ConditionCheck)?.TableName) ?? [command.input.TableName];
-    requireValue(["GetCommand", "TransactWriteCommand"].includes(command.constructor.name) &&
+    requireValue(["GetCommand", "QueryCommand", "TransactWriteCommand"].includes(command.constructor.name) &&
       tables.length > 0 && tables.every(name => name === tableName), "Outside isolated Task Create storage", "FORBIDDEN");
     return db.send(command);
   } };
@@ -56,6 +58,8 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
   }
   return {
     post: createApi("tasks", { configuration, getRepository, authorizeTaskCreate }).collectionPost,
+    view: createWorkspaceViewApi({ configuration, getRepository, isolation: () => true,
+      authorizeRead: authorizeTaskCreate, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
     receipt: createOperationApi({ configuration, getRepository, async authorizeScope(scope) {
       requireValue(scope.resource === "tasks", "Only Task receipts are authorized", "FORBIDDEN");
       await authorizeTaskCreate(scope.workspaceId);
