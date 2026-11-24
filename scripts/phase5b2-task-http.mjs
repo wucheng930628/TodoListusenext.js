@@ -409,6 +409,165 @@ try {
       console.log(JSON.stringify({ method: "DELETE", target: task.id, request: fields, status: 204 }));
     });
   }
+  if (process.argv.includes("--boards")) {
+    const sendBoard = (method, suffix, fields, operationKey, viaProxy = false) => fetch(
+      `${viaProxy ? `http://127.0.0.1:${proxyPort}` : origin}/api/boards${suffix}`, {
+        method, signal: AbortSignal.timeout(viaProxy ? 1500 : 15000), headers: { origin, "content-type": "application/json",
+          ...(operationKey ? { "idempotency-key": operationKey } : {}) }, body: JSON.stringify(fields),
+      },
+    );
+    const boardReceipt = operationKey => fetch(`${origin}/api/operations/${operationKey}?${new URLSearchParams({ resource: "boards", workspaceId })}`);
+    const byId = id => `/${encodeURIComponent(id)}`;
+    const boardInput = { workspaceId, position: 1, data: { id: "c2-board", name: "New Board", description: "", wipLimit: 2 } };
+    const boardGrant = { ...grant, version: 3, boardMutations: ["CREATE", "UPDATE", "DELETE", "ORDER"] };
+    let createdBoard;
+    await check("C2 Board Create authorization, validation and durable atomic replay", async () => {
+      await expect(sendBoard("POST", "", boardInput, randomUUID()), 403, "FORBIDDEN");
+      for (const state of [{ state: "REVOKED" }, { expiresAt: 1 }]) {
+        await put({ ...boardGrant, ...state });
+        await expect(sendBoard("POST", "", boardInput, randomUUID()), 403, "FORBIDDEN");
+      }
+      await put(boardGrant);
+      await expect(sendBoard("POST", "", { ...boardInput, position: -1 }, randomUUID()), 400, "VALIDATION");
+      await expect(sendBoard("POST", "", boardInput), 400, "VALIDATION");
+      await expect(sendBoard("POST", "", { ...boardInput, workspaceId: `SLOWLY#WORKSPACE#${randomUUID()}` }, randomUUID()), 403, "FORBIDDEN");
+      await remove(workspaceId);
+      await expect(sendBoard("POST", "", boardInput, randomUUID()), 404, "NOT_FOUND");
+      await put(workspace);
+      const operationKey = randomUUID();
+      const before = await get(workspaceId);
+      const fresh = await expect(sendBoard("POST", "", boardInput, operationKey), 201);
+      createdBoard = fresh.body.data;
+      assert.equal(fresh.response.headers.get("idempotency-status"), "created");
+      assert.deepEqual((await expect(sendBoard("POST", "", boardInput, operationKey), 200)).body.data, createdBoard);
+      await expect(sendBoard("POST", "", { ...boardInput, position: 2 }, operationKey), 409, "OPERATION_CONFLICT");
+      const duplicateIdKey = randomUUID();
+      await expect(sendBoard("POST", "", boardInput, duplicateIdKey), 409, "CONFLICT");
+      assert.equal(await get(receiptId(duplicateIdKey)), undefined);
+      assert.deepEqual((await expect(boardReceipt(operationKey), 200)).body.data.result, createdBoard);
+      assert.equal((await get(workspaceId)).version, before.version + 1);
+      assert.equal((await get(workspaceId)).boardCount, before.boardCount + 1);
+      console.log(JSON.stringify({ action: "Board POST", request: boardInput, status: 201, version: createdBoard.version }));
+    });
+    await check("C2 Board Update preserves children and rejects unauthorized or stale changes", async () => {
+      const widget = makeItem("WIDGET", { id: "retained-widget", type: "note", span: 4, height: 180, config: { text: "Keep this" } },
+        { parent: boardId, workspaceId });
+      const current = { ...await get(boardId), widgetCount: 1 };
+      await Promise.all([put(widget), put(current)]);
+      const before = (await expect(view(), 200)).body.data;
+      const children = before.boards.find(item => item.board.id === boardId);
+      assert.equal(children.widgets[0].id, widget.id);
+      const fields = { workspaceId, version: current.version, data: { name: "Updated fixture", wipLimit: 3 } };
+      await put({ ...boardGrant, boardMutations: ["CREATE"] });
+      await expect(sendBoard("PATCH", byId(boardId), fields, randomUUID()), 403, "FORBIDDEN");
+      await put(boardGrant);
+      await expect(sendBoard("PATCH", byId(boardId), { ...fields, workspaceId: `SLOWLY#WORKSPACE#${randomUUID()}` }, randomUUID()), 403, "FORBIDDEN");
+      await expect(sendBoard("PATCH", byId(`SLOWLY#BOARD#${randomUUID()}`), fields, randomUUID()), 404, "NOT_FOUND");
+      await expect(sendBoard("PATCH", byId(boardId), { ...fields, data: { widgetCount: 0 } }, randomUUID()), 400, "VALIDATION");
+      await put({ ...current, migrationLock: true });
+      await expect(sendBoard("PATCH", byId(boardId), fields, randomUUID()), 409, "MIGRATION_LOCKED");
+      await put(current);
+      const operationKey = randomUUID();
+      const { body } = await expect(sendBoard("PATCH", byId(boardId), fields, operationKey), 200);
+      assert.equal(body.data.version, current.version + 1);
+      assert.equal(body.data.data.wipLimit, 3);
+      assert.deepEqual((await expect(boardReceipt(operationKey), 200)).body.data.result, body.data);
+      await expect(sendBoard("PATCH", byId(boardId), fields, randomUUID()), 409, "CONFLICT");
+      const snapshot = (await expect(view(), 200)).body.data;
+      const reread = snapshot.boards.find(item => item.board.id === boardId);
+      assert.deepEqual(reread.tasks, children.tasks);
+      assert.deepEqual(reread.widgets, children.widgets);
+      assert.equal(snapshot.workspace.version, before.workspace.version);
+      console.log(JSON.stringify({ action: "Board PATCH", request: fields, status: 200, version: reread.board.version }));
+    });
+    await check("C2 complete Board order commits as a single versioned operation", async () => {
+      const first = await get(boardId);
+      const second = await get(createdBoard.id);
+      const root = await get(workspaceId);
+      const entries = [{ id: second.id, version: second.version, position: 0 }, { id: first.id, version: first.version, position: 1 }];
+      const fields = { workspaceId, entries };
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0]] }, randomUUID()), 409, "CONFLICT");
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], entries[0]] }, randomUUID()), 400, "VALIDATION");
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], { ...entries[1], position: 0 }] }, randomUUID()), 400, "VALIDATION");
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], { ...entries[1], position: -1 }] }, randomUUID()), 400, "VALIDATION");
+      const foreign = makeItem("BOARD", first.data, { parent: `SLOWLY#WORKSPACE#${randomUUID()}` });
+      await put(foreign);
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], { id: foreign.id, version: foreign.version, position: 1 }] }, randomUUID()), 403, "OWNERSHIP");
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], { ...entries[1], version: first.version + 1 }] }, randomUUID()), 409, "CONFLICT");
+      const oversized = Array.from({ length: 97 }, (_, position) => ({ id: `SLOWLY#BOARD#${randomUUID()}`, version: 1, position }));
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: oversized }, randomUUID()), 400, "VALIDATION");
+      const broken = { ...first, version: Number.MAX_SAFE_INTEGER };
+      const failedKey = randomUUID();
+      await put(broken);
+      await expect(sendBoard("PATCH", "/order", { ...fields, entries: [entries[0], { ...entries[1], version: broken.version }] }, failedKey), 500, "INTERNAL");
+      assert.equal(await get(receiptId(failedKey)), undefined);
+      assert.deepEqual(await get(first.id), broken);
+      assert.deepEqual(await get(second.id), second);
+      await put(first);
+      assert.deepEqual(await get(workspaceId), root);
+      assert.deepEqual(await get(first.id), first);
+      assert.deepEqual(await get(second.id), second);
+      const operationKey = randomUUID();
+      const { body } = await expect(sendBoard("PATCH", "/order", fields, operationKey), 200);
+      assert.deepEqual((await expect(sendBoard("PATCH", "/order", fields, operationKey), 200)).body.data, body.data);
+      const recovered = (await expect(boardReceipt(operationKey), 200)).body.data;
+      assert.equal(recovered.action, "ORDER");
+      assert.deepEqual(recovered.result, body.data);
+      const snapshot = (await expect(view(), 200)).body.data;
+      assert.deepEqual(snapshot.boards.map(item => item.board.id), [second.id, first.id]);
+      assert.deepEqual(snapshot.boards.map(item => item.board.version), [second.version + 1, first.version + 1]);
+      assert.equal(snapshot.workspace.version, root.version + 1);
+      assert.equal((await get(workspaceId)).boardCount, root.boardCount);
+      console.log(JSON.stringify({ action: "Board ORDER", request: fields, status: 200, positions: body.data.map(item => item.position) }));
+    });
+    await check("C2 transaction cancellation and non-empty Task/Widget Boards cannot be deleted", async () => {
+      const root = await get(workspaceId);
+      const occupiedKey = randomUUID();
+      const occupied = { ...makeItem("BOARD", boardInput.data, { parent: `SLOWLY#WORKSPACE#${randomUUID()}` }), id: `SLOWLY#BOARD#${occupiedKey}` };
+      await put(occupied);
+      await expect(sendBoard("POST", "", boardInput, occupiedKey), 409, "CONFLICT");
+      assert.equal(await get(receiptId(occupiedKey)), undefined);
+      assert.deepEqual(await get(workspaceId), root);
+      assert.deepEqual(await get(occupied.id), occupied);
+      await remove(occupied.id);
+      const first = await get(boardId);
+      const second = await get(createdBoard.id);
+      await expect(sendBoard("DELETE", byId(first.id), { workspaceId, version: first.version }, randomUUID()), 409, "NOT_EMPTY");
+      const widget = makeItem("WIDGET", { id: "fixture-widget", type: "note", span: 4, height: 180, config: {} }, { parent: second.id, workspaceId });
+      await put(widget);
+      await put({ ...second, widgetCount: 1 });
+      await expect(sendBoard("DELETE", byId(second.id), { workspaceId, version: second.version }, randomUUID()), 409, "NOT_EMPTY");
+      assert.deepEqual(await get(widget.id), widget);
+      await remove(widget.id);
+      await put(second);
+      assert.deepEqual(await get(workspaceId), root);
+    });
+    await check("C2 empty Board DELETE timeout recovers Receipt and count changes only once", async () => {
+      const before = await get(workspaceId);
+      const target = await get(createdBoard.id);
+      const fields = { workspaceId, version: target.version };
+      await expect(sendBoard("DELETE", byId(target.id), fields), 400, "VALIDATION");
+      const operationKey = randomUUID();
+      afterCommit = Promise.withResolvers();
+      await assert.rejects(sendBoard("DELETE", byId(target.id), fields, operationKey, true), { name: "TimeoutError" });
+      assert.equal((await afterCommit.promise).status, 204);
+      const confirmed = (await expect(boardReceipt(operationKey), 200)).body.data;
+      assert.equal(confirmed.action, "DELETE");
+      assert.equal(confirmed.state, "CONFIRMED");
+      assert.equal(confirmed.targetId, target.id);
+      assert.equal(confirmed.result, null);
+      const replay = await sendBoard("DELETE", byId(target.id), fields, operationKey);
+      assert.equal(replay.status, 204);
+      assert.equal(replay.headers.get("idempotency-status"), "replayed");
+      assert.equal(await get(target.id), undefined);
+      assert.equal((await get(workspaceId)).boardCount, before.boardCount - 1);
+      assert.equal((await get(workspaceId)).version, before.version + 1);
+      const snapshot = (await expect(view(), 200)).body.data;
+      assert.deepEqual(snapshot.boards.map(item => item.board.id), [boardId]);
+      assert.equal(snapshot.boards[0].tasks.length, (await get(boardId)).taskCount);
+      console.log(JSON.stringify({ action: "Board DELETE", request: fields, status: 204 }));
+    });
+  }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
