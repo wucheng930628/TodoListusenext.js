@@ -26,7 +26,7 @@ export function createOperationApi({ getRepository, configuration = () => proces
       return Response.json({ data: { operationId, state: "CONFIRMED", resource: receipt.resource, workspaceId: receipt.workspaceId,
         ...(receipt.boardId ? { boardId: receipt.boardId } : {}), targetId: receipt.targetId, createdAt: receipt.createdAt,
         ...(receipt.action === "CREATE" ? {} : { action: receipt.action }),
-        result: receipt.action === "DELETE" ? null : dto(receipt.result) } }, { headers });
+        result: receipt.action === "DELETE" ? null : receipt.action === "ORDER" ? receipt.result.map(dto) : dto(receipt.result) } }, { headers });
     } catch (error) {
       const statuses = { VALIDATION: 400, FORBIDDEN: 403, OWNERSHIP: 403, OPERATION_CONFLICT: 409 };
       const code = error instanceof DataError && statuses[error.code] ? error.code : "OPERATION_UNKNOWN";

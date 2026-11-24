@@ -1,7 +1,7 @@
 import "server-only";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { DataError, INDEX_NAME, assertId, assertItemSize, fromFrontend, makeItem, requireValue, validateData } from "./data-model.mjs";
-import { assertOperationKey, createOperation, assertSameOperation, createReceipt, createTaskMutationOperation, workspaceCreateScope } from "./crud-operation.mjs";
+import { assertOperationKey, createOperation, assertSameOperation, createReceipt, createMutationOperation, workspaceCreateScope } from "./crud-operation.mjs";
 
 // No SDK client is constructed here: tests inject an isolated document-client double.
 export function createRepository(db, { tableName = "SlowlyTasks", clock = () => new Date().toISOString() } = {}) {
@@ -68,7 +68,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return item;
   }
   async function createOnce(resource, input, key, authority) {
-    if (authority) requireValue(resource === "tasks" && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
+    if (authority) requireValue(["tasks", "boards"].includes(resource) && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
     const operation = createOperation(resource, input, key);
     const data = fromFrontend(operation.type, input.data);
     const replay = receipt => {
@@ -80,7 +80,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     try {
       let item;
       if (resource === "workspaces") item = await createWorkspace(data, operation);
-      else if (resource === "boards") item = await createBoard(input.workspaceId, data, input.position, operation);
+      else if (resource === "boards") item = await createBoard(input.workspaceId, data, input.position, operation, authority);
       else {
         const board = await get("BOARD", input.boardId);
         requireValue(input.workspaceId === undefined || input.workspaceId === board.workspaceId, "Workspace mismatch", "OWNERSHIP");
@@ -106,8 +106,8 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     "Operation scope does not match", "OPERATION_CONFLICT");
     return receipt;
   }
-  async function mutateTaskOnce(action, id, input, key, mutate) {
-    const operation = createTaskMutationOperation(action, id, input, key);
+  async function mutateOnce(resource, action, id, input, key, mutate) {
+    const operation = createMutationOperation(resource, action, id, input, key);
     const replay = receipt => {
       assertSameOperation(receipt, operation);
       return { item: receipt.result, replayed: receipt.attemptId !== operation.attemptId };
@@ -139,26 +139,46 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const item = revised(previous, { data: validateData("WORKSPACE", data) });
     await commit([put(item, previous)]); return item;
   }
-  async function createBoard(workspaceId, data, position = 0, operation) {
+  async function createBoard(workspaceId, data, position = 0, operation, authority) {
     const parent = await get("WORKSPACE", workspaceId);
-    requireValue(Number.isSafeInteger(parent.boardCount), "Workspace count metadata requires review");
+    requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount >= 0, "Workspace count metadata requires review");
+    if (authority) {
+      expected(parent, authority.workspaceVersion);
+      const siblings = await list("BOARD", workspaceId);
+      requireValue(siblings.length === parent.boardCount && !siblings.some(board => board.data.id === data.id),
+        "Workspace Board membership or frontend ID conflicts", "CONFLICT");
+    }
     const item = { ...makeItem("BOARD", data, { parent: workspaceId, position, now: clock() }), widgetPresence: "absent" };
-    return commitCreate(item, [put(item), put(revised(parent, { boardCount: parent.boardCount + 1 }), parent)], operation);
+    return commitCreate(item, [put(item), put(revised(parent, { boardCount: parent.boardCount + 1 }), parent)], operation, authority);
   }
-  async function updateBoard(id, data, version) {
+  async function updateBoard(id, data, version, authority, operation) {
     const previous = await get("BOARD", id); expected(previous, version);
+    if (authority) requireValue(previous.workspaceId === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
     const validated = validateData("BOARD", data);
     requireValue(validated.id === previous.data.id, "Frontend id is immutable");
     requireValue(validated.wipLimit >= previous.doingCount, "WIP limit is below current task count", "WIP_LIMIT");
-    const item = revised(previous, { data: validated }); await commit([put(item, previous)]); return item;
+    const item = revised(previous, { data: validated });
+    const actions = [put(item, previous)];
+    if (operation) actions.push(put(createReceipt(operation, item, clock())));
+    await commit(actions, authority); return item;
   }
-  async function deleteBoard(id, version) {
+  async function deleteBoard(id, version, authority, operation) {
     const board = await get("BOARD", id); expected(board, version);
+    if (authority) requireValue(board.workspaceId === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
     requireValue(board.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
     requireValue(board.taskCount === 0 && board.widgetCount === 0, "Only empty boards may be deleted", "NOT_EMPTY");
     const parent = await get("WORKSPACE", board.workspaceId);
+    if (authority) {
+      expected(parent, authority.workspaceVersion);
+      const [tasks, widgets] = await Promise.all([list("TASK", id), list("WIDGET", id)]);
+      requireValue(!tasks.length && !widgets.length, "Only empty boards may be deleted", "NOT_EMPTY");
+    }
     requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount > 0, "Workspace count metadata requires review");
-    await commit([remove(board), put(revised(parent, { boardCount: parent.boardCount - 1 }), parent)]);
+    const data = { ...parent.data };
+    if (authority && data.activeBoardId === board.data.id) delete data.activeBoardId;
+    const actions = [remove(board), put(revised(parent, { boardCount: parent.boardCount - 1, data }), parent)];
+    if (operation) actions.push(put(createReceipt(operation, board, clock())));
+    await commit(actions, authority);
   }
   async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false, operation, authority) {
     const board = await get("BOARD", boardId);
@@ -195,21 +215,37 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     }
     return item ?? null;
   }
-  async function reorder(type, parentId, entries) {
+  async function reorder(type, parentId, entries, authority, operation) {
     requireValue(["BOARD", "TASK", "WIDGET"].includes(type), "Unsupported order type");
     requireValue(Array.isArray(entries) && entries.length > 0 && entries.length <= (type === "BOARD" ? 99 : 98) && new Set(entries.map(entry => entry.id)).size === entries.length, "Order exceeds atomic capacity (boards: 99; children: 98)");
     const parent = await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parentId);
+    if (authority) {
+      requireValue(type === "BOARD" && parentId === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
+      expected(parent, authority.workspaceVersion);
+      requireValue(entries.length <= (operation ? 96 : 97) && new Set(entries.map(entry => entry.position)).size === entries.length,
+        "Invalid or over-capacity Board order");
+      requireValue(entries.length === parent.boardCount, "Board order must include every Board", "CONFLICT");
+    }
     const items = await Promise.all(entries.map(async entry => {
       const old = await get(type, entry.id); expected(old, entry.version);
       requireValue(old.parentId === parentId, "Entity belongs to a different parent", "OWNERSHIP");
       requireValue(Number.isSafeInteger(entry.position) && entry.position >= 0 && entry.position <= 999999999999, "Invalid position");
       return { old, item: revised(old, { position: entry.position, gsi1sk: `${type}#${String(entry.position).padStart(12, "0")}#${old.id}` }) };
     }));
-    await commit([...items.map(({ old, item }) => put(item, old)), put(revised(parent, {}), parent)]);
-    return items.map(({ item }) => item);
+    if (authority) {
+      const indexed = await list("BOARD", parentId);
+      const submitted = new Set(entries.map(entry => entry.id));
+      requireValue(indexed.length === entries.length && indexed.every(board => submitted.has(board.id)),
+        "Workspace Board membership changed; refresh before ordering", "CONFLICT");
+    }
+    const result = items.map(({ item }) => item);
+    const actions = [...items.map(({ old, item }) => put(item, old)), put(revised(parent, {}), parent)];
+    if (operation) actions.push(put(createReceipt(operation, parent, clock(), result)));
+    await commit(actions, authority);
+    return result;
   }
   return {
-    createOnce, getOperation, mutateTaskOnce,
+    createOnce, getOperation, mutateOnce,
     createWorkspace, getWorkspace: id => get("WORKSPACE", id), saveWorkspace,
     createBoard, getBoard: id => get("BOARD", id), updateBoard, deleteBoard,
     listBoards: id => list("BOARD", id), listTasks: id => list("TASK", id), listWidgets: id => list("WIDGET", id),
@@ -224,7 +260,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     createWidget: (boardId, data, position) => childChange("WIDGET", boardId, null, data, null, position),
     updateWidget: (boardId, id, data, version) => childChange("WIDGET", boardId, id, data, version),
     deleteWidget: (boardId, id, version) => childChange("WIDGET", boardId, id, null, version),
-    reorderBoards: (id, entries) => reorder("BOARD", id, entries),
+    reorderBoards: (id, entries, authority, operation) => reorder("BOARD", id, entries, authority, operation),
     reorderTasks: (id, entries) => reorder("TASK", id, entries),
     reorderWidgets: (id, entries) => reorder("WIDGET", id, entries),
   };

@@ -22,7 +22,7 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
   } };
   const store = migrationStore(restricted, tableName);
   const getRepository = () => createRepository(restricted, { tableName });
-  async function authorizeTaskWrite(requestedWorkspace, action = "CREATE") {
+  async function authorizeWrite(requestedWorkspace, action = "CREATE", resource = "tasks") {
     requireValue(env.NODE_ENV === "development" && env.SLOWLY_LOCAL_API === "1" &&
       env.SLOWLY_FORMAL_VIEW_ENABLED !== "1" && !env.SLOWLY_CONTROLLED_UI_TABLE && !env.SLOWLY_CONTROLLED_UI_RUN_ID &&
       !env.SLOWLY_MAIN_UI_TEST && env.DYNAMODB_ENDPOINT === "http://127.0.0.1:9000" &&
@@ -36,8 +36,9 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
         grant.workspaceId === workspaceId && grant.migrationId === migrationId && grant.planId === migrationId &&
         grant.sourceNamespace === sourceNamespace && Number.isSafeInteger(grant.version) &&
         Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > now() &&
-        (action === "CREATE" || Array.isArray(grant.taskMutations) && grant.taskMutations.includes(action)),
-      "Task write grant is unavailable", "FORBIDDEN");
+        (resource === "boards" ? Array.isArray(grant.boardMutations) && (action === null ? grant.boardMutations.length > 0 : grant.boardMutations.includes(action))
+          : action === "CREATE" || Array.isArray(grant.taskMutations) && grant.taskMutations.includes(action)),
+      "Workspace write grant is unavailable", "FORBIDDEN");
     }
     requireActiveGrant();
     const workspace = await store.get(workspaceId);
@@ -58,14 +59,18 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
       return [store.check(grant), store.check({ id, entityType, version, state, lockState, releaseVerificationHash })];
     } };
   }
-  const tasks = createApi("tasks", { configuration, getRepository, authorizeTaskCreate: authorizeTaskWrite, authorizeTaskMutation: authorizeTaskWrite });
+  const tasks = createApi("tasks", { configuration, getRepository, authorizeCreate: authorizeWrite, authorizeMutation: authorizeWrite });
+  const boards = createApi("boards", { configuration, getRepository,
+    authorizeCreate: id => authorizeWrite(id, "CREATE", "boards"),
+    authorizeMutation: (id, action) => authorizeWrite(id, action, "boards") });
   return {
     post: tasks.collectionPost, patch: tasks.itemPatch, delete: tasks.itemDelete,
+    boardPost: boards.collectionPost, boardPatch: boards.itemPatch, boardDelete: boards.itemDelete, boardOrder: boards.orderPatch,
     view: createWorkspaceViewApi({ configuration, getRepository, isolation: () => true,
-      authorizeRead: authorizeTaskWrite, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
+      authorizeRead: authorizeWrite, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
     receipt: createOperationApi({ configuration, getRepository, async authorizeScope(scope) {
-      requireValue(scope.resource === "tasks", "Only Task receipts are authorized", "FORBIDDEN");
-      await authorizeTaskWrite(scope.workspaceId);
+      requireValue(["tasks", "boards"].includes(scope.resource), "Receipt scope is not authorized", "FORBIDDEN");
+      await authorizeWrite(scope.workspaceId, scope.resource === "boards" ? null : "CREATE", scope.resource);
     } }),
   };
 }

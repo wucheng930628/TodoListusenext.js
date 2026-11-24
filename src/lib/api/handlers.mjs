@@ -106,7 +106,7 @@ export function dto(item) {
     ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: item.data };
 }
 
-export function createApi(resource, { getRepository, configuration = () => process.env, authorizeTaskCreate, authorizeTaskMutation } = {}) {
+export function createApi(resource, { getRepository, configuration = () => process.env, authorizeCreate, authorizeMutation } = {}) {
   const definition = definitions[resource]; requireValue(definition, "Unknown resource");
   const { type, singular } = definition;
   const wrap = action => async (request, context = {}) => {
@@ -140,22 +140,23 @@ export function createApi(resource, { getRepository, configuration = () => proce
     }
   }
   const scopeKeys = resource === "workspaces" ? [] : resource === "boards" ? ["workspaceId"] : ["boardId", "workspaceId"];
-  async function taskMutation(action, request, id, input, mutate) {
+  async function mutation(action, request, id, input, mutate) {
     let authority;
     let key;
-    if (authorizeTaskMutation) {
+    if (authorizeMutation) {
       assertId(input.workspaceId, "WORKSPACE");
       key = request.headers.get("idempotency-key");
+      requireValue(resource !== "boards" || action !== "DELETE" || key !== null, "Board deletion requires an operation key");
       if (key !== null) assertOperationKey(key);
-      authority = await authorizeTaskMutation(input.workspaceId, action);
-      requireValue(authority, "Task mutation is not authorized", "FORBIDDEN");
+      authority = await authorizeMutation(input.workspaceId, action);
+      requireValue(authority, "Mutation is not authorized", "FORBIDDEN");
     }
     const repo = await getRepository();
     const execute = operation => mutate(repo, authority, operation);
-    const result = key ? await repo.mutateTaskOnce(action, id, input, key, execute) : { item: await execute() };
+    const result = key ? await repo.mutateOnce(resource, action, id, input, key, execute) : { item: await execute() };
     const resultHeaders = key ? { ...headers, "Operation-Id": key, "Idempotency-Status": result.replayed ? "replayed" : "committed" } : headers;
     return action === "DELETE" ? new Response(null, { status: 204, headers: resultHeaders })
-      : Response.json({ data: dto(result.item) }, { headers: resultHeaders });
+      : Response.json({ data: action === "ORDER" ? result.item.map(dto) : dto(result.item) }, { headers: resultHeaders });
   }
   return {
     collectionGet: wrap(async request => {
@@ -181,11 +182,11 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const operationKey = request.headers.get("idempotency-key");
       if (operationKey !== null) assertOperationKey(operationKey);
       let authority;
-      if (authorizeTaskCreate) {
-        requireValue(resource === "tasks" && operationKey !== null && input.position !== undefined, "Task Create requires an operation key and position");
+      if (authorizeCreate) {
+        requireValue(operationKey !== null && input.position !== undefined, "Create requires an operation key and position");
         assertId(input.workspaceId, "WORKSPACE");
-        authority = await authorizeTaskCreate(input.workspaceId);
-        requireValue(authority, "Task Create is not authorized", "FORBIDDEN");
+        authority = await authorizeCreate(input.workspaceId);
+        requireValue(authority, "Create is not authorized", "FORBIDDEN");
       }
       const repo = await getRepository(); let item;
       if (operationKey !== null) {
@@ -212,7 +213,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
       if (["tasks", "widgets"].includes(resource)) assertId(input.boardId, "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
-      return taskMutation("UPDATE", request, id, input, async (repo, authority, operation) => {
+      return mutation("UPDATE", request, id, input, async (repo, authority, operation) => {
         const previous = await repo[`get${singular}`](id);
         await assertScope(repo, previous, input, true);
         const data = { ...previous.data, ...input.data };
@@ -227,7 +228,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
         if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
         let item;
         if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
-        else if (resource === "boards") item = await repo.updateBoard(id, data, input.version);
+        else if (resource === "boards") item = await repo.updateBoard(id, data, input.version, authority, operation);
         else if (resource === "tasks") item = await repo.updateTask(input.boardId, id, data, input.version, authority, operation);
         else item = await repo.updateWidget(input.boardId, id, data, input.version);
         return item;
@@ -240,10 +241,10 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
       else assertId(input.boardId, "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
-      return taskMutation("DELETE", request, id, input, async (repo, authority, operation) => {
+      return mutation("DELETE", request, id, input, async (repo, authority, operation) => {
         const item = await repo[`get${singular}`](id);
         await assertScope(repo, item, input, true);
-        if (resource === "boards") await repo.deleteBoard(id, input.version);
+        if (resource === "boards") await repo.deleteBoard(id, input.version, authority, operation);
         else if (resource === "tasks") await repo.deleteTask(input.boardId, id, input.version, authority, operation);
         else await repo.deleteWidget(input.boardId, id, input.version);
         return null;
@@ -258,6 +259,9 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const parent = resource === "boards" ? input.workspaceId : input.boardId;
       assertId(parent, resource === "boards" ? "WORKSPACE" : "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
+      if (resource === "boards" && authorizeMutation) {
+        return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo.reorderBoards(parent, input.entries, authority, operation));
+      }
       const repo = await getRepository();
       if (resource !== "boards") await scopedBoard(repo, parent, input.workspaceId);
       return response((await repo[`reorder${singular}s`](parent, input.entries)).map(dto));

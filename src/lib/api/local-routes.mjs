@@ -7,17 +7,20 @@ import { controlledBinding, controlledEnvironment } from "../testing/controlled-
 
 export function localRoutes(resource) {
   const handlers = createApi(resource, { getRepository: async () => {
-    requireValue(!process.env.SLOWLY_PHASE5_B1_TABLE, "Only isolated Task Create is enabled", "FORBIDDEN");
+    requireValue(!process.env.SLOWLY_PHASE5_B1_TABLE, "Only isolated operations are enabled", "FORBIDDEN");
     if (controlledBinding()) return (await controlledEnvironment()).repository;
     return (await import("../slowly.mjs")).slowly;
   } });
-  if (resource !== "tasks") return handlers;
+  if (resource !== "tasks" && resource !== "boards") return handlers;
   const isolatedWrite = (action, controlledHandler) => async (request, context) => {
     if (process.env.SLOWLY_PHASE5_B1_TABLE) return isolatedTaskRoute(action, request, context);
     if (process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_CONTROLLED_UI_RUN_ID) return controlledHandler(request, context);
-    return Response.json({ error: { code: "FORBIDDEN", message: "Task write requires an isolated authorization scope." } },
+    return Response.json({ error: { code: "FORBIDDEN", message: "Write requires an isolated authorization scope." } },
       { status: 403, headers: { "Cache-Control": "no-store" } });
   };
+  if (resource === "boards") return { ...handlers, collectionPost: isolatedWrite("boardPost", handlers.collectionPost),
+    itemPatch: isolatedWrite("boardPatch", handlers.itemPatch), itemDelete: isolatedWrite("boardDelete", handlers.itemDelete),
+    orderPatch: isolatedWrite("boardOrder", handlers.orderPatch) };
   return { ...handlers, collectionPost: isolatedWrite("post", handlers.collectionPost),
     itemPatch: isolatedWrite("patch", handlers.itemPatch), itemDelete: isolatedWrite("delete", handlers.itemDelete) };
 }
