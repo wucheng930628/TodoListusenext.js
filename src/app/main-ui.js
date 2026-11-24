@@ -44,7 +44,7 @@ export default function MainUi({ options = defaults, isolationEntry = false, iso
         <form onSubmit={event => { event.preventDefault(); void attempt(() => controller.activate({ workspaceId, apiReady })); }}>
           <label>Workspace ID<input aria-label="API Workspace ID" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)} placeholder="SLOWLY#WORKSPACE#…" /></label>
           <label><input type="checkbox" checked={apiReady} onChange={event => setApiReady(event.target.checked)} />我已確認 API Ready</label>
-          <button type="submit" disabled={state.activating || state.status === "loading" || state.mutation === "loading"}>啟用唯讀 API Mode</button>
+          <button type="submit" disabled={state.activating || state.mutation === "loading"}>啟用唯讀 API Mode</button>
         </form>
         <button type="button" onClick={() => void attempt(async () => { controller.deactivate(); setConfirmation(""); })}>切回 localStorage Mode</button>
         {state.mode === "api" && <>

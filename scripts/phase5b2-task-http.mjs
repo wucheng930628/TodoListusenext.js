@@ -887,6 +887,12 @@ try {
           assert.equal((await get(target.id)).version, target.version + 1);
           assert.equal((await get(boardId)).version, storedBoard.version + 1);
           console.log("PASS D3 Chrome ordering, replay, conflict, offline receipt and reload");
+        }),
+        lifecycleScenario: process.argv.includes("--browser-lifecycle") && (async driver => {
+          await put({ ...(await get(grant.id)), childWorkspaceWrites: true, workspaceMutations: ["CREATE", "UPDATE", "DELETE"] });
+          const { checkChromeLifecycle } = await import("../tests/helpers/chrome-workspace-lifecycle.mjs");
+          const result = await checkChromeLifecycle(driver, { origin, get });
+          console.log(JSON.stringify({ phase5D4: result }));
         }) });
       console.log(JSON.stringify({ chromeAcceptance: result }));
     });

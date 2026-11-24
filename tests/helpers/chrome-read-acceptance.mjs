@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, deniedId, injectConflict, writeScenario, expectedBoardName }) {
+export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, deniedId, injectConflict, writeScenario, lifecycleScenario, expectedBoardName }) {
   const binary = [process.env.SLOWLY_CHROME_BIN, ...[process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
     .filter(Boolean).map(root => join(root, "Google", "Chrome", "Application", "chrome.exe"))].find(path => path && existsSync(path));
   assert.ok(binary, "Chrome binary missing; set SLOWLY_CHROME_BIN");
@@ -48,7 +48,7 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
     });
   }
   const evaluate = async expression => {
-    const result = await send("Runtime.evaluate", { expression, returnByValue: true });
+    const result = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || "Browser evaluation failed");
     return result.result.value;
   };
@@ -119,10 +119,12 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
     assert.ok(responses.some(response => response.url.includes(encodeURIComponent(secondWorkspaceId)) && response.status === 200));
     const apiRequests = requests.filter(request => request.url.startsWith(origin + "/api/"));
     assert.ok(apiRequests.length >= 4 && apiRequests.every(request => request.method === "GET"));
+    const driver = { send, evaluate, until, activate, requests, responses, text };
     if (writeScenario) {
-      await writeScenario({ send, evaluate, until, activate, requests, responses, text });
+      await writeScenario(driver);
       assert.equal(await evaluate("localStorage.getItem('slowly-workspace-v2')"), initialStorage);
     }
+    if (lifecycleScenario) await lifecycleScenario(driver);
     return { browser: version.product, apiGetCount: apiRequests.length };
   } finally {
     try { await injectConflict(false); await send("Browser.close", {}, null); }
