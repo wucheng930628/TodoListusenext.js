@@ -107,14 +107,22 @@ Workspace View 以 GSI 找候選項目、用強一致讀取取得內容，並重
 
 | 項目 | 結果 |
 | --- | --- |
-| 全部 Node 測試檔 | 238/238，無略過。 |
+| 全部 Node、React 與 API 測試檔 | 最終稽核重新執行，238/238，無略過。 |
 | HTTP 與 Chrome | 31/31 組。Chrome 158.0.8127.38 實測兩個 Workspace、各兩個 Board、Task、Widget，三次重新載入，40 筆成功寫入皆有匹配 Receipt。跨 Workspace 的拒絕請求沒有留下 Receipt。 |
 | Next.js 重啟 | 停止測試程序後，健康檢查無法連線。以新程序在同一隔離表重啟。兩個 Workspace 的原始 DynamoDB 記錄、Workspace View 的資料、位置、版本與關聯一致。Chrome 重新進入後顯示持久化資料。 |
 | B1 與 Phase 4 隔離整合 | B1、Controlled UI、Release、Main UI／Safe Create、Trusted Evidence 通過。包含既有逾時、回應遺失、UNKNOWN、Receipt、冪等、409、Migration Lock、WIP、來源隔離與授權拒絕測試。 |
-| Phase 4 遷移並行穩定性 | 首次與其他隔離套件並行執行時，`Concurrent sibling operations serialize parent versions correctly` 回傳 `INTEGRITY_CONFLICT`（Target ownership, content or version changed）。之後四次逐次重跑各通過 14/14。首次失敗保留，穩定性待釐清。 |
+| Phase 4 遷移並行穩定性 | 修正前受控重現的根因為父 Board 與父 Receipt 讀自不同交易快照。改用 `TransactGet` 同時讀取，保留原完整性與條件式寫入檢查。稽核核對正常並行 10/10 輪、受控交錯 10/10 輪，每輪 14 案，共 280/280，且全部測試表清理。見 [遷移並行根因與追蹤](phase5e-migration-concurrency.md)。 |
 | Build 與 ESLint | Build 與 `git diff --check` 通過。完整 ESLint 的三項既有錯誤在 `workspace-board.js`，包含兩處 effect 同步更新 state 及首頁連結規則。修改的腳本 ESLint 通過，新增錯誤 0。 |
 
-隔離遷移的失敗與成功測試均清理測試表，內建唯讀對照回報正式表未變更。交付文件與本輪 Chrome 驗收已完成。Phase 5-E 正式交付判定仍待人工確認這項並行穩定性問題，以及既有 ESLint 基線。
+Phase 4 隔離整合紀錄為 Controlled UI 6/6、Release 13/13、Main UI／Safe Create 19/19、Trusted Evidence 8/8。B1 另行重跑通過並清理。本次重新執行 Build、完整測試檔、B1、ESLint 與 diff 檢查。HTTP／Chrome 31 組和 280 個遷移案例使用修正後的既有執行紀錄，逐項核對結果與清理狀態。
+
+## 最終安全稽核
+
+- 正式 `SlowlyTasks` 與 `SlowlyByParent` 均為 ACTIVE。35 筆項目的內容指紋與修正後回歸的正式表快照一致，未發現資料庫端 Pending 或 UNKNOWN 控制紀錄。DynamoDB 交易採原子提交，驗收紀錄沒有未確認或部分提交的測試寫入。
+- 正式 Workspace View 的 `formalRuntimeWritesEnabled` 維持 false。本輪未執行正式 Migration、Release、Cutover 或授權核發，未寫入正式資料或修改原始備份及使用者 Chrome 儲存。原始備份未重新讀取驗證。使用者 Chrome 的 Pending、UNKNOWN 與 Recovery Journal 未重新查驗。
+- 查到一張早期殘留隔離表 `Slowly_Phase4B2_29e6a829aa864fa98906b0af3718411b`。舊報告為 `.phase4b2-test-runs/29e6a829-aa86-4fa9-8906-b0af3718411b.json`，記載當時無法確認測試伺服器停止，因此保留該表。現有 7 筆，包括 3 個 Workspace、3 個 Board、1 個測試控制記錄，沒有 Pending 或 UNKNOWN。本輪維持唯讀，待確認表的擁有流程與清理授權。
+
+Phase 4 回歸已通過，遷移並行問題已結案。Phase 5-E 最終交付仍有舊隔離表清理待確認，正式瀏覽器的即時狀態也待人工驗收。完整 ESLint 的 3 項既有錯誤列為技術債，規則與結果維持原樣。依上述證據，本次稽核結論為 `PHASE5_E_COMPLETE: false` 與 `PHASE5_READY: false`。
 
 ## 重跑隔離驗收
 
