@@ -3,7 +3,7 @@ import { DataError, requireValue } from "../data-model.mjs";
 import { assertOperationKey, workspaceCreateScope } from "../crud-operation.mjs";
 import { guard, query, assertApiId, dto } from "./handlers.mjs";
 
-export function createOperationApi({ getRepository, configuration = () => process.env }) {
+export function createOperationApi({ getRepository, configuration = () => process.env, authorizeScope }) {
   return async (request, context) => {
     const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", Vary: "Origin" };
     try {
@@ -20,6 +20,7 @@ export function createOperationApi({ getRepository, configuration = () => proces
         if (["tasks", "widgets"].includes(scope.resource)) assertApiId(scope.boardId, "BOARD");
         else requireValue(scope.boardId === undefined, "Unexpected board");
       }
+      if (authorizeScope) await authorizeScope(scope);
       const receipt = await (await getRepository()).getOperation(operationId, scope);
       if (!receipt) return Response.json({ error: { code: "OPERATION_NOT_FOUND", state: "NOT_FOUND", message: "No confirmed receipt is visible. The create outcome remains unknown." } }, { status: 404, headers });
       return Response.json({ data: { operationId, state: "CONFIRMED", resource: receipt.resource, workspaceId: receipt.workspaceId,

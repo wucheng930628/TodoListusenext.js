@@ -23,7 +23,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(item.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
     return { Delete: { TableName: tableName, Key: { id: item.id }, ConditionExpression: "#v = :v AND #t = :t AND (attribute_not_exists(#lock) OR #lock = :unlocked)", ExpressionAttributeNames: { "#v": "version", "#t": "entityType", "#lock": "migrationLock" }, ExpressionAttributeValues: { ":v": item.version, ":t": item.entityType, ":unlocked": false } } };
   }
-  async function commit(actions) {
+  async function commit(actions, authority) {
     const roots = new Set(actions.filter(action => action.Put).map(action => action.Put.Item.entityType === "WORKSPACE" ? action.Put.Item.id : action.Put.Item.workspaceId).filter(Boolean));
     requireValue(roots.size <= 1, "A write cannot span workspaces");
     for (const workspaceId of roots) {
@@ -32,10 +32,12 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
       requireValue(workspace.migrationLock !== true, "Workspace migration barrier is held", "MIGRATION_LOCKED");
       requireValue(!Object.hasOwn(workspace, "migrationOwner") || workspace.migrationReleaseVersion === 2, "Workspace release protocol is not certified", "MIGRATION_LOCKED");
       actions.push({ ConditionCheck: { TableName: tableName, Key: { id: workspaceId },
-        ConditionExpression: "#t = :t AND #s = :s AND (attribute_not_exists(#lock) OR #lock = :unlocked) AND (attribute_not_exists(#owner) OR #release = :protocol)",
-        ExpressionAttributeNames: { "#t": "entityType", "#s": "schemaVersion", "#lock": "migrationLock", "#owner": "migrationOwner", "#release": "migrationReleaseVersion" },
-        ExpressionAttributeValues: { ":t": "WORKSPACE", ":s": 1, ":unlocked": false, ":protocol": 2 } } });
+        ConditionExpression: "#t = :t AND #s = :s AND (attribute_not_exists(#lock) OR #lock = :unlocked) AND (attribute_not_exists(#owner) OR #release = :protocol)" +
+          (authority ? " AND #version = :version" : ""),
+        ExpressionAttributeNames: { "#t": "entityType", "#s": "schemaVersion", "#lock": "migrationLock", "#owner": "migrationOwner", "#release": "migrationReleaseVersion", ...(authority ? { "#version": "version" } : {}) },
+        ExpressionAttributeValues: { ":t": "WORKSPACE", ":s": 1, ":unlocked": false, ":protocol": 2, ...(authority ? { ":version": authority.workspaceVersion } : {}) } } });
     }
+    if (authority) actions.push(...authority.transactionChecks());
     requireValue(actions.length <= 100 && Buffer.byteLength(JSON.stringify(actions)) < 3500000, "Transaction too large");
     try { await db.send(new TransactWriteCommand({ TransactItems: actions })); }
     catch (error) {
@@ -56,16 +58,17 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const result = await db.send(new GetCommand({ TableName: tableName, Key: { id: `SLOWLY#CRUD_OPERATION#${key}` }, ConsistentRead: true }));
     return result.Item;
   }
-  async function commitCreate(item, actions, operation) {
+  async function commitCreate(item, actions, operation, authority) {
     if (operation) {
       item.id = operation.targetId;
       if (item.parentId) item.gsi1sk = `${item.entityType}#${String(item.position).padStart(12, "0")}#${item.id}`;
       actions.push(put(createReceipt(operation, item, clock())));
     }
-    await commit(actions);
+    await commit(actions, authority);
     return item;
   }
-  async function createOnce(resource, input, key) {
+  async function createOnce(resource, input, key, authority) {
+    if (authority) requireValue(resource === "tasks" && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
     const operation = createOperation(resource, input, key);
     const data = fromFrontend(operation.type, input.data);
     const replay = receipt => {
@@ -81,7 +84,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
       else {
         const board = await get("BOARD", input.boardId);
         requireValue(input.workspaceId === undefined || input.workspaceId === board.workspaceId, "Workspace mismatch", "OWNERSHIP");
-        item = await childChange(operation.type, input.boardId, null, data, null, input.position, false, operation);
+        item = await childChange(operation.type, input.boardId, null, data, null, input.position, false, operation, authority);
       }
       return { item, replayed: false };
     } catch (cause) {
@@ -142,8 +145,9 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(Number.isSafeInteger(parent.boardCount) && parent.boardCount > 0, "Workspace count metadata requires review");
     await commit([remove(board), put(revised(parent, { boardCount: parent.boardCount - 1 }), parent)]);
   }
-  async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false, operation) {
+  async function childChange(type, boardId, id, data, version, position, preserveCompletionTime = false, operation, authority) {
     const board = await get("BOARD", boardId);
+    if (authority) requireValue(board.workspaceId === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
     const previous = id ? await get(type, id) : null;
     if (previous) { expected(previous, version); requireValue(previous.boardId === boardId && previous.workspaceId === board.workspaceId, "Entity belongs to a different board", "OWNERSHIP"); }
     const deleting = data === null;
@@ -163,7 +167,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(doingCount <= board.data.wipLimit && doingCount >= 0, "WIP limit exceeded", "WIP_LIMIT");
     const nextBoard = revised(board, { [countKey]: board[countKey] + (previous ? deleting ? -1 : 0 : 1), doingCount, ...(type === "WIDGET" ? { widgetPresence: "present" } : {}) });
     const actions = [deleting ? remove(previous) : put(item, previous), put(nextBoard, board)];
-    if (operation) await commitCreate(item, actions, operation);
+    if (operation) await commitCreate(item, actions, operation, authority);
     else await commit(actions);
     return item ?? null;
   }

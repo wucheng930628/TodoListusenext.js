@@ -106,7 +106,7 @@ export function dto(item) {
     ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: item.data };
 }
 
-export function createApi(resource, { getRepository, configuration = () => process.env } = {}) {
+export function createApi(resource, { getRepository, configuration = () => process.env, authorizeTaskCreate } = {}) {
   const definition = definitions[resource]; requireValue(definition, "Unknown resource");
   const { type, singular } = definition;
   const wrap = action => async (request, context = {}) => {
@@ -163,9 +163,16 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (["tasks", "widgets"].includes(resource)) { assertId(input.boardId, "BOARD"); if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE"); }
       const operationKey = request.headers.get("idempotency-key");
       if (operationKey !== null) assertOperationKey(operationKey);
+      let authority;
+      if (authorizeTaskCreate) {
+        requireValue(resource === "tasks" && operationKey !== null && input.position !== undefined, "Task Create requires an operation key and position");
+        assertId(input.workspaceId, "WORKSPACE");
+        authority = await authorizeTaskCreate(input.workspaceId);
+        requireValue(authority, "Task Create is not authorized", "FORBIDDEN");
+      }
       const repo = await getRepository(); let item;
       if (operationKey !== null) {
-        const result = await repo.createOnce(resource, input, operationKey);
+        const result = await repo.createOnce(resource, input, operationKey, authority);
         return Response.json({ data: dto(result.item) }, { status: result.replayed ? 200 : 201,
           headers: { ...headers, "Idempotency-Status": result.replayed ? "replayed" : "created", "Operation-Id": operationKey } });
       }
