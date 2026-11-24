@@ -706,6 +706,117 @@ try {
       console.log(JSON.stringify({ action: "Widget DELETE", request: fields, status: 204 }));
     });
   }
+  if (process.argv.includes("--workspaces")) {
+    const sendWorkspace = (method, fields, key = randomUUID(), target = "", useProxy = false) => fetch(
+      `${useProxy ? `http://127.0.0.1:${proxyPort}` : origin}/api/workspaces${target ? `/${encodeURIComponent(target)}` : ""}`, {
+        method, signal: AbortSignal.timeout(useProxy ? 1500 : 15000),
+        headers: { origin, "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(fields),
+      });
+    const receiptFor = (key, target) => fetch(`${origin}/api/operations/${key}?${new URLSearchParams({
+      resource: "workspaces", ...(target ? { workspaceId: target } : { scope: "local-workspace-create-v1" }),
+    })}`);
+    const currentGrant = await get(grant.id);
+    const lifecycleGrant = { ...currentGrant, version: currentGrant.version + 1, workspaceMutations: ["CREATE", "UPDATE", "DELETE"] };
+    const fields = { data: { name: "New Workspace", description: "HTTP fixture", settings: { layout: "compact" } } };
+    let created;
+    await check("C4 authorized Workspace Create initializes an empty view and replays its Receipt", async () => {
+      await expect(sendWorkspace("POST", fields), 403, "FORBIDDEN");
+      await put({ ...lifecycleGrant, state: "REVOKED" });
+      await expect(sendWorkspace("POST", fields), 403, "FORBIDDEN");
+      await put({ ...lifecycleGrant, expiresAt: 1 });
+      await expect(sendWorkspace("POST", fields), 403, "FORBIDDEN");
+      await put(lifecycleGrant);
+      await expect(sendWorkspace("POST", {}), 400, "VALIDATION");
+      await expect(sendWorkspace("POST", { data: { activeBoardId: board.data.id } }), 400, "VALIDATION");
+      await expect(sendWorkspace("POST", { data: { name: "" } }), 400, "VALIDATION");
+      await expect(sendWorkspace("POST", { data: { id: workspaceId } }), 400, "VALIDATION");
+      const key = randomUUID();
+      const response = await expect(sendWorkspace("POST", fields, key), 201);
+      created = response.body.data;
+      assert.equal(created.id, `SLOWLY#WORKSPACE#${key}`);
+      assert.equal((await get(created.id)).boardCount, 0);
+      assert.equal(created.data.activeBoardId, undefined);
+      assert.deepEqual((await expect(sendWorkspace("POST", fields, key), 200)).body.data, created);
+      await expect(sendWorkspace("POST", { data: { ...fields.data, name: "different" } }, key), 409, "OPERATION_CONFLICT");
+      assert.deepEqual((await expect(receiptFor(key), 200)).body.data.result, created);
+      const empty = (await expect(view(created.id), 200)).body.data;
+      assert.deepEqual(empty.workspace, created);
+      assert.deepEqual(empty.boards, []);
+      assert.equal(empty.readiness.eligible, true);
+      console.log(JSON.stringify({ action: "Workspace POST", request: fields, status: 201, version: created.version }));
+    });
+    await check("C4 Workspace Update validates active Board and preserves the complete hierarchy", async () => {
+      const initial = (await expect(view(), 200)).body.data;
+      const version = initial.workspace.version;
+      const patch = { version, data: { name: "Updated", description: "Description", activeBoardId: board.data.id, settings: { layout: "compact" } } };
+      await expect(sendWorkspace("PATCH", { ...patch, data: { activeBoardId: boardId } }, randomUUID(), workspaceId), 400, "VALIDATION");
+      await expect(sendWorkspace("PATCH", { ...patch, data: { boardCount: 0 } }, randomUUID(), workspaceId), 400, "VALIDATION");
+      await expect(sendWorkspace("PATCH", { ...patch, version: version + 1 }, randomUUID(), workspaceId), 409, "CONFLICT");
+      await expect(sendWorkspace("PATCH", patch, randomUUID(), `SLOWLY#WORKSPACE#${randomUUID()}`), 404, "NOT_FOUND");
+      const foreign = makeItem("WORKSPACE", {});
+      await put(foreign);
+      await expect(sendWorkspace("PATCH", patch, randomUUID(), foreign.id), 403, "FORBIDDEN");
+      const root = await get(workspaceId);
+      await put({ ...root, migrationLock: true });
+      await expect(sendWorkspace("PATCH", patch, randomUUID(), workspaceId), 409, "MIGRATION_LOCKED");
+      await put(root);
+      const key = randomUUID();
+      const updated = (await expect(sendWorkspace("PATCH", patch, key, workspaceId), 200)).body.data;
+      const receipt = (await expect(receiptFor(key, workspaceId), 200)).body.data;
+      assert.equal(receipt.action, "UPDATE");
+      assert.deepEqual(receipt.result, updated);
+      assert.equal(updated.version, version + 1);
+      const live = (await expect(view(), 200)).body.data;
+      assert.deepEqual(live.workspace, updated);
+      assert.deepEqual(live.boards, initial.boards);
+      assert.equal(live.workspace.data.activeBoardId, board.data.id);
+      assert.equal((await get(workspaceId)).boardCount, root.boardCount);
+      console.log(JSON.stringify({ action: "Workspace PATCH", request: patch, status: 200, version: updated.version }));
+    });
+    await check("C4 failed transaction and dependent entities do not leave partial changes", async () => {
+      const collisionKey = randomUUID();
+      const existing = { ...makeItem("WORKSPACE", {}), id: `SLOWLY#WORKSPACE#${collisionKey}` };
+      await put(existing);
+      await expect(sendWorkspace("POST", fields, collisionKey), 409, "CONFLICT");
+      assert.deepEqual(await get(existing.id), existing);
+      assert.equal(await get(receiptId(collisionKey)), undefined);
+      const parent = await get(workspaceId);
+      await expect(sendWorkspace("DELETE", { version: parent.version }, randomUUID(), workspaceId), 409, "NOT_EMPTY");
+      assert.deepEqual(await get(workspaceId), parent);
+      const orphan = makeItem("TASK", { ...input.data, description: "", notes: "", urgent: false, priority: "\u4e00\u822c", tag: "fixture",
+        date: "", time: "", subtasks: [] }, { parent: `SLOWLY#BOARD#${randomUUID()}`, workspaceId: created.id });
+      await put(orphan);
+      const key = randomUUID();
+      await expect(sendWorkspace("DELETE", { version: created.version }, key, created.id), 409, "NOT_EMPTY");
+      assert.deepEqual(await get(orphan.id), orphan);
+      assert.equal(await get(receiptId(key)), undefined);
+      await remove(orphan.id);
+    });
+    await check("C4 Workspace DELETE timeout confirms an empty-workspace tombstone without cascade", async () => {
+      const updateKey = randomUUID();
+      created = (await expect(sendWorkspace("PATCH", { version: created.version, data: { name: "Updated empty Workspace" } },
+        updateKey, created.id), 200)).body.data;
+      const fields = { version: created.version };
+      const before = (await expect(view(), 200)).body.data;
+      const key = randomUUID();
+      afterCommit = Promise.withResolvers();
+      await assert.rejects(sendWorkspace("DELETE", fields, key, created.id, true), { name: "TimeoutError" });
+      assert.equal((await afterCommit.promise).status, 204);
+      const durable = (await expect(receiptFor(key, created.id), 200)).body.data;
+      assert.equal(durable.state, "CONFIRMED");
+      assert.equal(durable.action, "DELETE");
+      assert.equal(durable.targetId, created.id);
+      assert.equal(durable.result, null);
+      assert.deepEqual((await expect(receiptFor(updateKey, created.id), 200)).body.data.result, created);
+      const replay = await sendWorkspace("DELETE", fields, key, created.id);
+      assert.equal(replay.status, 204);
+      assert.equal(replay.headers.get("idempotency-status"), "replayed");
+      await expect(view(created.id), 404, "NOT_FOUND");
+      assert.equal(await get(created.id), undefined);
+      assert.deepEqual((await expect(view(), 200)).body.data.boards, before.boards);
+      console.log(JSON.stringify({ action: "Workspace DELETE", request: fields, status: 204 }));
+    });
+  }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
