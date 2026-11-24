@@ -8,7 +8,8 @@ import { createRecoveryJournal } from "../lib/client/recovery-journal.mjs";
 
 const defaults = { development: process.env.NODE_ENV === "development" };
 export default function MainUi({ options = defaults, isolationEntry = false }) {
-  const effectiveOptions = useMemo(() => ({ ...options, journal: options.journal || createRecoveryJournal({ namespace: isolationEntry ? "isolated" : "formal" }) }), [options, isolationEntry]);
+  const effectiveOptions = useMemo(() => ({ ...options, readOnly: options.readOnly ?? !isolationEntry,
+    journal: options.journal || createRecoveryJournal({ namespace: isolationEntry ? "isolated" : "formal" }) }), [options, isolationEntry]);
   const state = useMainWorkspace(effectiveOptions); const { controller } = state;
   const [workspaceId, setWorkspaceId] = useState(""); const [apiReady, setApiReady] = useState(false);
   const [confirmation, setConfirmation] = useState(""); const [message, setMessage] = useState("");
@@ -21,7 +22,9 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
     window.addEventListener?.("beforeunload", protect);
     return () => window.removeEventListener?.("beforeunload", protect);
   }, [controller]);
-  const attempt = async fn => { setMessage(""); try { await fn(); } catch (error) { setMessage(error.message); } };
+  const attempt = async fn => { setMessage(""); try { await fn(); } catch (error) {
+    if (controller.getSnapshot().error !== error) setMessage(error.status ? `${error.status} ${error.message}` : error.message);
+  } };
   async function backup() {
     try {
       const artifact = await captureVerifiedBackup({ origin: window.location.origin });
@@ -40,35 +43,39 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
         <form onSubmit={event => { event.preventDefault(); void attempt(() => controller.activate({ workspaceId, apiReady })); }}>
           <label>Workspace ID<input aria-label="API Workspace ID" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)} placeholder="SLOWLY#WORKSPACE#…" /></label>
           <label><input type="checkbox" checked={apiReady} onChange={event => setApiReady(event.target.checked)} />我已確認 API Ready</label>
-          <button type="submit" disabled={state.status === "loading" || state.mutation === "loading"}>啟用唯讀 API Mode</button>
+          <button type="submit" disabled={state.activating || state.status === "loading" || state.mutation === "loading"}>啟用唯讀 API Mode</button>
         </form>
         <button type="button" onClick={() => void attempt(async () => { controller.deactivate(); setConfirmation(""); })}>切回 localStorage Mode</button>
         {state.mode === "api" && <>
-          <form onSubmit={event => { event.preventDefault(); void attempt(() => controller.authorizeWrites(confirmation)); }}>
+          {!effectiveOptions.readOnly && <form onSubmit={event => { event.preventDefault(); void attempt(() => controller.authorizeWrites(confirmation)); }}>
             <label>確認 Workspace<input aria-label="授權寫入 Workspace ID" value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>
             <button type="submit" disabled={state.status !== "success" || state.uncertainWrite || state.mutation === "loading"}>另外授權寫入</button>
-          </form>
-          <button type="button" disabled={state.mutation === "loading"} onClick={() => void attempt(controller.refresh)}>重新讀取 API 資料</button>
-          <button type="button" onClick={controller.cancel}>取消等待</button>
+          </form>}
+          <button type="button" disabled={state.activating || state.status === "loading" || state.mutation === "loading"} onClick={() => void attempt(controller.refresh)}>重新讀取 API 資料</button>
           <span role="status">{state.allowWrites ? "已授權測試寫入" : "唯讀"}</span>
         </>}
       </details>
+      {(state.activating || state.mode === "api") && <button type="button" onClick={controller.cancel}>取消等待</button>}
       {message && <p role="alert">{message}</p>}
       {state.error && <p role="alert">{state.error.status ? `${state.error.status} ` : ""}{state.error.message}</p>}
       {state.mode === "localStorage" && state.startupStatus !== "ready" && <p role="alert">正在核對未確認操作；本機編輯暫停。{state.recoveryWorkspaceId && `請明確選擇 ${state.recoveryWorkspaceId} 以恢復。`}</p>}
-      {state.mode === "api" && state.status === "loading" && <p role="status">讀取 API 資料中…</p>}
+      {(state.activating || state.mode === "api" && state.status === "loading") && <p role="status">讀取 API 資料中…</p>}
+      {state.mode === "api" && state.status === "error" && state.projection && <p role="status">目前顯示上次成功讀取的 API 資料。</p>}
       {state.uncertainWrite && <p role="alert">寫入結果尚未確認，已暫停後續寫入。請先核對資料，不要重送新增。</p>}
-      {state.mode === "api" && state.uncertainWrite && !state.createRecovery && <button type="button" onClick={() => void attempt(async () => { if (window.confirm("已人工核對伺服器的更新／刪除／排序結果？此操作不會重送寫入。")) await controller.resolveUncertain(confirmation); })}>已人工核對未確認結果</button>}
+      {state.mode === "api" && state.uncertainWrite && !state.createRecovery && <>
+        {effectiveOptions.readOnly && <label>確認 Workspace<input value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>}
+        <button type="button" onClick={() => void attempt(async () => { if (window.confirm("已人工核對伺服器的更新／刪除／排序結果？此操作不會重送寫入。")) await controller.resolveUncertain(confirmation); })}>已人工核對未確認結果</button>
+      </>}
       {state.mode === "api" && state.uncertainWrite && state.createRecovery && <div>
         <details><summary>原始未確認操作內容</summary><pre>{JSON.stringify(controller.recoveryDetails(), null, 2)}</pre></details>
         <p role="status">新增操作 {state.createRecovery.operationKey} · {state.createRecovery.state}{state.createRecovery.receiptState === "NOT_FOUND" ? "（尚未查到 Receipt，結果仍不明）" : ""}</p>
         <button type="button" disabled={state.createRecovery.checking || state.mutation === "loading"} onClick={() => void attempt(controller.recoverCreate)}>查詢新增結果</button>
-        <button type="button" disabled={state.createRecovery.checking || state.mutation === "loading" || state.createRecovery.state === "CONFLICT"} onClick={() => {
+        {!effectiveOptions.readOnly && <button type="button" disabled={state.createRecovery.checking || state.mutation === "loading" || state.createRecovery.state === "CONFLICT"} onClick={() => {
           if (window.confirm("使用原 Operation Key 與原始內容安全重送這次新增？")) void attempt(() => controller.resendCreate(confirmation));
-        }}>以原 Key 與原內容重送</button>
+        }}>以原 Key 與原內容重送</button>}
       </div>}
     </section>}
-    {state.mode === "localStorage" ? isolationEntry ? <p>隔離測試入口尚未啟用 API；不讀寫本機資料。</p> : <WorkspaceBoard key="local" navigationGuard={controller} localWritesAllowed={state.startupStatus === "ready"} />
+    {state.mode === "localStorage" ? isolationEntry ? <p>隔離測試入口尚未啟用 API；不讀寫本機資料。</p> : <WorkspaceBoard key="local" navigationGuard={controller} localWritesAllowed={state.startupStatus === "ready" && !state.activating} />
       : state.projection ? state.projection.workspace.boards.length ?
         <WorkspaceBoard key={`${state.workspaceId}:${state.activeBoardId}:${state.recoveredCreateRevision}`} apiSession={createMainUiSession(state)} /> :
         <EmptyApiWorkspace state={state} onError={setMessage} /> : <main className="content"><p>{state.status === "error" ? "API 載入失敗，沒有切回本機資料或建立預設看板。" : "正在確認 Workspace 與 Readiness…"}</p></main>}

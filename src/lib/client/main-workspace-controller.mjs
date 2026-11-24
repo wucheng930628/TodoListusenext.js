@@ -4,12 +4,13 @@ import { createSafeCreateIntent } from "./safe-create.mjs";
 import { createRecoveryJournal, validateRecovery } from "./recovery-journal.mjs";
 
 const error = (code, message) => new SlowlyApiError(message, { code, outcome: "not-sent" });
-export function createMainWorkspaceController({ api = createSlowlyApi(), readView = api.getWorkspaceView, development = process.env.NODE_ENV === "development", journal = createRecoveryJournal() } = {}) {
+export function createMainWorkspaceController({ api = createSlowlyApi(), readView = api.getWorkspaceView, development = process.env.NODE_ENV === "development", readOnly = false, journal = createRecoveryJournal() } = {}) {
   let state = { mode: "localStorage", status: "idle", workspaceId: null, activeBoardId: null, projection: null, allowWrites: false, mutation: "idle", error: null, uncertainWrite: false, operation: null, createRecovery: null, recoveredCreateRevision: 0, scopeRevision: 0 };
-  state = { ...state, startupStatus: "idle", recoveryWorkspaceId: null };
+  state = { ...state, startupStatus: "idle", recoveryWorkspaceId: null, activating: false };
   const initial = state; const listeners = new Set(); let epoch = 0; let readAbort; let writeAbort; let pending = false; let bootstrapVersion = 0;
   const drafts = new Map(); // Page-memory only; never mixed into DTOs or localStorage.
   let createIntent; let recoveryRecord; let journalReady = false; let activating = false;
+  let readFlight;
   const publish = patch => { state = { ...state, ...patch }; for (const listener of listeners) listener(); };
   const currentBoard = () => state.projection?.workspace.boards.find(board => board.id === state.activeBoardId);
   function formalGateOpen(snapshot = state.projection?.snapshot) {
@@ -17,6 +18,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     return !capabilities?.formalCutoverRequired || (capabilities.formalCutoverEnabled === true && capabilities.formalCutoverExpiresAt > Date.now());
   }
   function requireFormalWrites() {
+    if (readOnly) throw error("WRITES_DISABLED", "此 API 模式僅供讀取。");
     if (!formalGateOpen()) throw error("CUTOVER_REQUIRED", "正式 Cutover Gate 尚未授權或已過期，保持唯讀。");
     if (state.projection?.snapshot.readiness?.capabilities?.formalRuntimeWritesEnabled === false) {
       throw error("WRITES_DISABLED", "正式 API 尚未授權業務寫入，保持唯讀。");
@@ -28,11 +30,18 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     if (state.uncertainWrite && !recovery) throw error("RECOVERY_REQUIRED", "請先核對未確認操作，不能切換資料來源。");
   }
   function cancel() {
-    epoch++; readAbort?.abort(); writeAbort?.abort();
+    epoch++; readFlight = undefined; readAbort?.abort(); writeAbort?.abort();
     publish({ ...(pending ? { uncertainWrite: true, mutation: "not-confirmed", allowWrites: false,
       ...(createIntent ? { createRecovery: { operationKey: createIntent.operationKey, state: "UNKNOWN", checking: false } } : {}) } : {}), status: state.projection ? "success" : "idle" });
   }
-  async function refresh(activation) {
+  function refresh() {
+    if (state.activating) return Promise.resolve();
+    if (readFlight) return readFlight;
+    const flight = read().finally(() => { if (readFlight === flight) readFlight = undefined; });
+    readFlight = flight;
+    return flight;
+  }
+  async function read(activation) {
     if (!activation && state.mode !== "api") return;
     if (pending) throw error("MUTATION_IN_PROGRESS", "請等待目前的寫入結果。");
     readAbort?.abort(); readAbort = new AbortController(); const signal = readAbort.signal; const current = ++epoch; const workspaceId = activation?.workspaceId ?? state.workspaceId;
@@ -41,6 +50,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       if (typeof readView !== "function") throw error("VIEW_API_APPROVAL_REQUIRED", "需要批准權威資料投影與 Readiness API，現在不能安全啟用。");
       const snapshot = await readView(workspaceId, { signal });
       if (current !== epoch || signal.aborted) return;
+      if (activation && drafts.size) throw error("UNSAVED_DRAFTS", "請先處理未儲存草稿。");
       if (!snapshot || snapshot.readiness?.workspaceId !== workspaceId || snapshot.readiness.apiReady !== true || snapshot.readiness.eligible !== true) {
         const reasons = { WORKSPACE_COUNT_REQUIRED: "Workspace 缺少完整計數資料，需人工確認", WIDGET_PRESENCE_REQUIRED: "Widget 缺省資訊不完整，不能推測", WORKSPACE_ORIGIN_REQUIRED: "Workspace 來源尚未確認", MIGRATION_NOT_READY: "Migration 尚未完整 Release", MIGRATION_LOCKED: "Migration 鎖定尚未解除" };
         const detail = snapshot?.readiness?.blockers?.map(item => reasons[item.code] || item.code).join("；");
@@ -52,6 +62,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       const activeBoardId = projection.workspace.boards.some(board => board.id === preferredBoardId) ? preferredBoardId
         : projection.workspace.boards.some(board => board.id === projection.workspace.activeBoardId) ? projection.workspace.activeBoardId : projection.workspace.boards[0]?.id || null;
       publish({ ...activation?.commit(), projection, activeBoardId, status: "success", error: null });
+      return true;
     } catch (cause) { if (current !== epoch || signal.aborted) return; if (!activation) publish({ status: "error", error: cause, allowWrites: false }); throw cause; }
   }
   function authorizeWrites(confirmation) {
@@ -230,18 +241,26 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     },
     async activate({ workspaceId, apiReady }) {
       if (!development || apiReady !== true || !/^SLOWLY#WORKSPACE#[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(workspaceId || "")) throw error("API_MODE_DISABLED", "僅限開發環境，需明確指定 Workspace 與 API Ready。");
-      guardSwitch({ recovery: state.workspaceId === workspaceId || state.recoveryWorkspaceId === workspaceId }); activating = true; bootstrapVersion++;
+      guardSwitch({ recovery: state.workspaceId === workspaceId || state.recoveryWorkspaceId === workspaceId });
+      activating = true;
+      readFlight = undefined;
+      readAbort?.abort();
+      const activationEpoch = ++epoch;
+      publish({ activating: true, error: null,
+        ...(state.status === "loading" ? { status: state.projection ? "success" : "idle" } : {}) });
       try {
         const stored = validateRecovery(await journal.load()); journalReady = true;
+        if (epoch !== activationEpoch) return;
         if (stored && stored.workspaceId !== workspaceId) throw error("RECOVERY_REQUIRED", "另一個 Workspace 有未確認寫入，請先選擇該 Workspace 恢復。");
-        await refresh({ workspaceId, stored, commit() {
+        const committed = await read({ workspaceId, stored, commit() {
+          bootstrapVersion++;
           recoveryRecord = stored;
           createIntent = stored?.intent ? createSafeCreateIntent(api, stored.intent.resource, stored.intent.input, { operationKey: stored.intent.operationKey }) : null;
           return { ...initial, mode: "api", workspaceId, uncertainWrite: Boolean(stored),
             createRecovery: createIntent ? { operationKey: createIntent.operationKey, state: "UNKNOWN", checking: false } : null, scopeRevision: state.scopeRevision + 1 };
         } });
-        if (createIntent) { try { await recoverCreate(); } catch { /* Keep UNKNOWN frozen until an explicit query succeeds. */ } }
-      } finally { activating = false; }
+        if (committed && createIntent) { try { await recoverCreate(); } catch { /* Keep UNKNOWN frozen until an explicit query succeeds. */ } }
+      } finally { activating = false; publish({ activating: false }); }
     },
     deactivate() { guardSwitch(); cancel(); publish({ ...initial, startupStatus: "ready", scopeRevision: state.scopeRevision + 1 }); },
     selectBoard(frontendId) {

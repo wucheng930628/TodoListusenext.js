@@ -12,6 +12,7 @@ export function createMainUiSession(state) {
   return {
     workspaceId: state.workspaceId,
     workspace: { ...state.projection.workspace, activeBoardId: state.activeBoardId }, busy: state.status === "loading" || state.mutation === "loading",
+    reading: state.status === "loading",
     writable: state.status === "success" && state.allowWrites && state.mutation !== "loading" && !state.uncertainWrite,
     selectBoard: action("selectBoard"), saveTask: action("saveTask"), deleteTask: action("deleteTask"), saveWidget: action("saveWidget"),
     reorderTasks: action("reorderTasks"), reorderBoards: action("reorderBoards"), refresh: action("refresh"),
