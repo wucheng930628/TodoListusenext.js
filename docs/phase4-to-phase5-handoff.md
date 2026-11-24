@@ -1,6 +1,6 @@
 # slowly. Phase 4 至 Phase 5 交接
 
-本文件提供交接基線。正式 Cutover、正式執行驗收與正式寫入技術阻擋未結案。正式首頁目前預設 localStorage。唯讀正式 View 是已遷移資料的診斷與切換驗證入口。
+Phase 4 正式唯讀 Cutover 與 Chrome 人工驗收已完成。首頁重新整理仍預設 localStorage。本次正式唯讀授權已到期，歷史驗收紀錄保留。Phase 5 從已驗證的 DynamoDB Local 資料與唯讀安全邊界接手，開發須等使用者授權。
 
 ## 從哪裡接手
 
@@ -14,13 +14,17 @@
 
 正式資料、Evidence 效期、驗證結果與 Gate A／B／C 邊界見 [Phase 4 最終報告](phase4-final-report.md)。申請、核准、兌換與切換各有授權；即時瀏覽器複檢與來源凍結不能沿用隔離結果代替。
 
-## Phase 5 優先項目
+## Phase 5 開發計畫
 
-1. **API Mode 穩定性與效能。** 先補正式 mutation 的伺服器授權、版本演進、撤銷及稽核，再量測 Workspace View 的強一致讀取與刷新成本。保留交易條件、父版本、Receipt 與 Workspace Barrier。
-2. **同步與錯誤恢復。** 明確區分已拒絕、已確認與結果不明。保留 Idempotency-Key、原始意圖及條件更新，加入版本衝突比對及可觀察的 Pending 狀態。
-3. **UI／UX。** 清楚呈現唯讀、寫入授權、409 及已失效狀態。調整本機 hydration 前先鎖定 SSR、離頁保護與草稿回復行為，再處理剩餘 ESLint。
-4. **E2E。** Chrome fresh profile 與獨立表驗證來源、隔離、Reload、Recovery、401／403／409 和資料版本。不將隔離結果替代正式 Chrome 人工驗收。
-5. **部署身分與權限。** 現有 loopback、Host／Origin 與本機配置用於本機流程。部署前增加可驗證身分、Workspace 授權、最小角色權限、金鑰輪替及審計，覆蓋所有寫入入口。
+| 順序 | 開發項目 | 驗收條件 |
+| --- | --- | --- |
+| 1 | 正式寫入授權 | 定義伺服器端 Workspace 與操作範圍授權、期限、撤銷與稽核。逐筆拒絕未授權、越權及失效請求。Phase 4 Release 快照保留作為遷移基線，合法業務新版本由 runtime 寫入權限及稽核紀錄驗證 |
+| 2 | Workspace／Board／Task／Widget CRUD | 盤點既有 API 與 Repository，補齊正式入口所需的明確操作。隔離驗證新增、編輯、刪除及排序，保留 WIP、歸屬、Safe Create、原子交易、Receipt 與 Workspace Barrier |
+| 3 | 版本控制與同步 | 以 entity 和 parent version 做條件更新。驗證兩分頁競爭時舊版本回傳 409 並保留草稿。寫入確認後重讀最新 View，舊回應、切換看板及亂序請求均不能覆蓋新版本 |
+| 4 | 失敗復原 | UI 區分拒絕、確認與 UNKNOWN。保存原意圖、scope、Idempotency-Key 與 Journal。逾時、斷線、Reload 或回應遺失先查 Receipt，驗證無重複 Create，也不覆蓋 localStorage |
+| 5 | 持久化驗收 | 先以隔離表和獨立 Chrome profile 實測 Reload、伺服器重新啟動、跨分頁版本競爭、來源與 Workspace 恢復。若要讓 API Mode 在 Reload 後延續，先確立範圍驗證和未決操作的處置契約。正式 CRUD 須另行授權，使用明確測試資料及逐步核對的清理方案 |
+
+補強測試覆蓋 API、React、DynamoDB Local、Chrome E2E、Build 與 ESLint。優先補齊 SSR、離頁保護與草稿回復覆蓋，再處理既有 3 項 WorkspaceBoard lint 問題。量測正式 View 強一致讀取與寫後重讀成本，優化前先固定保護條件。部署前再規劃可驗證身分、最小角色權限、金鑰輪替與審計。Phase 5 首個開發交付是隔離環境中可驗證的正式寫入授權與 CRUD 契約。
 
 ## Recovery 交接
 
