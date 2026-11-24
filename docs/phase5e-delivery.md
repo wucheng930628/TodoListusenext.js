@@ -122,7 +122,13 @@ Phase 4 隔離整合紀錄為 Controlled UI 6/6、Release 13/13、Main UI／Safe
 - 正式 Workspace View 的 `formalRuntimeWritesEnabled` 維持 false。本輪未執行正式 Migration、Release、Cutover 或授權核發，未寫入正式資料或修改原始備份及使用者 Chrome 儲存。原始備份未重新讀取驗證。使用者 Chrome 的 Pending、UNKNOWN 與 Recovery Journal 未重新查驗。
 - 早期隔離表 `Slowly_Phase4B2_29e6a829aa864fa98906b0af3718411b` 的 7 筆資料已完成清理。已用舊報告、fixture 控制記錄及正式表的唯讀對照核對歸屬。3 個 Workspace、3 個 Board 和 1 個測試控制記錄已先備份並驗證內容雜湊，再用一筆條件式交易刪除。強一致讀取確認筆數由 7 降為 0，表仍為 ACTIVE，正式表指紋一致。清理清單、備份與驗證紀錄存於 `.phase4b2-test-runs/` 下該次執行的 `item-cleanup-76284bbf-a33d-4784-833e-e02b21125fbf` 檔案組。Controlled UI 6/6 通過，實際空表也驗證缺少 fixture proof 時會拒絕授權。
 
-Phase 4 回歸已通過，遷移並行問題已結案。舊隔離表清理已完成，正式瀏覽器的即時狀態仍待人工驗收。完整 ESLint 的 3 項既有錯誤列為技術債，規則與結果維持原樣。目前 `PHASE5_E_COMPLETE: false` 與 `PHASE5_READY: false`。
+## 最終人工簽核
+
+- **USER_CONFIRMED（2026-11-25）**。使用者親自在原始 Chrome 確認首頁及 Workspace、Board、Task、Widget 顯示正常，沒有未儲存草稿，IndexedDB operations 無 active、Pending 或 UNKNOWN，Recovery Journal 無未完成紀錄。使用者確認原始 localStorage 與 verified backup 一致，正式資料和原始備份未修改。此紀錄來自使用者人工驗收。
+- **唯讀複核**。正式 `SlowlyTasks` 和 `SlowlyByParent` 均為 ACTIVE，35 筆資料的逐筆指紋與修正後的驗收快照相符，資料庫端無 Pending 或 UNKNOWN。清理前備份與清單的 7 筆 ID、內容雜湊及清理驗證紀錄相符。舊隔離表仍為 ACTIVE、0 筆，沒有其他 `Slowly_Phase*` 驗收表。
+- **結案判定**。Phase 4 回歸、Phase 5-B 至 E 的隔離驗收與人工簽核均通過。完整 ESLint 的 3 項既有錯誤保留為技術債。正式 API 寫入維持關閉，本輪未執行 Cutover、Migration 或 Release。
+
+最終旗標為 `PHASE5_E_COMPLETE: true` 與 `PHASE5_READY: true`。適用範圍與部署前條件見 [Phase 5 最終完成報告](phase5-final-completion-report.md)。
 
 ## 重跑隔離驗收
 
