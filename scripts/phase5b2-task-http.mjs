@@ -96,6 +96,21 @@ async function expect(responsePromise, status, code) {
   return { response, body };
 }
 
+async function stopServer() {
+  if (child?.pid && child.exitCode === null) {
+    const stopped = once(child, "exit");
+    if (process.platform === "win32") {
+      const stopTree = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      const [code] = await once(stopTree, "exit");
+      if (code !== 0) {
+        await Promise.race([stopped, delay(1000)]);
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      }
+    } else child.kill("SIGTERM");
+    await stopped;
+  }
+}
+
 try {
   await client.send(new CreateTableCommand({ TableName: tableName, BillingMode: "PAY_PER_REQUEST",
     KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
@@ -110,26 +125,29 @@ try {
   await close(portReservation);
   assert.notEqual(port, 3000);
   const origin = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)], {
-    windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", DYNAMODB_ENDPOINT: endpoint,
-      AWS_REGION: "ap-northeast-1", AWS_ACCESS_KEY_ID: "local", AWS_SECRET_ACCESS_KEY: "local",
-      SLOWLY_LOCAL_API: "1", SLOWLY_LOCAL_API_ORIGIN: origin, SLOWLY_FORMAL_VIEW_ENABLED: "0",
-      SLOWLY_FORMAL_EVIDENCE_FILE: "", SLOWLY_FORMAL_EVIDENCE_KEY_FILE: "", SLOWLY_CONTROLLED_UI_TABLE: "",
-      SLOWLY_CONTROLLED_UI_RUN_ID: "", SLOWLY_MAIN_UI_TEST: "",
-      SLOWLY_PHASE5_B1_TABLE: tableName, SLOWLY_PHASE5_B1_WORKSPACE: workspaceId,
-      SLOWLY_PHASE5_B1_PLAN: migrationId, SLOWLY_PHASE5_B1_SOURCE_NAMESPACE: sourceNamespace,
-      SLOWLY_PHASE5_D2_UI: process.argv.includes("--browser-write") ? "1" : "0" },
-  });
-  for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => { serverLog = (serverLog + chunk).slice(-8000); });
   const view = (id = workspaceId) => fetch(`${origin}/api/workspaces/${encodeURIComponent(id)}/view`, { signal: AbortSignal.timeout(15000) });
-  let online = false;
-  for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
-    try { const poll = await view(); online = poll.status === 200; await poll.body.cancel(); if (online) break; }
-    catch { /* The startup probe never mutates data. */ }
-    await delay(200);
+  async function startServer() {
+    child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)], {
+      windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", DYNAMODB_ENDPOINT: endpoint,
+        AWS_REGION: "ap-northeast-1", AWS_ACCESS_KEY_ID: "local", AWS_SECRET_ACCESS_KEY: "local",
+        SLOWLY_LOCAL_API: "1", SLOWLY_LOCAL_API_ORIGIN: origin, SLOWLY_FORMAL_VIEW_ENABLED: "0",
+        SLOWLY_FORMAL_EVIDENCE_FILE: "", SLOWLY_FORMAL_EVIDENCE_KEY_FILE: "", SLOWLY_CONTROLLED_UI_TABLE: "",
+        SLOWLY_CONTROLLED_UI_RUN_ID: "", SLOWLY_MAIN_UI_TEST: "",
+        SLOWLY_PHASE5_B1_TABLE: tableName, SLOWLY_PHASE5_B1_WORKSPACE: workspaceId,
+        SLOWLY_PHASE5_B1_PLAN: migrationId, SLOWLY_PHASE5_B1_SOURCE_NAMESPACE: sourceNamespace,
+        SLOWLY_PHASE5_D2_UI: process.argv.includes("--browser-write") ? "1" : "0" },
+    });
+    for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => { serverLog = (serverLog + chunk).slice(-8000); });
+    let online = false;
+    for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
+      try { const poll = await view(); online = poll.status === 200; await poll.body.cancel(); if (online) break; }
+      catch { /* The startup probe never mutates data. */ }
+      await delay(200);
+    }
+    assert.ok(online, serverLog);
   }
-  assert.ok(online, serverLog);
+  await startServer();
   const input = { workspaceId, boardId, position: 0, data: { id: "http-task", title: "HTTP integration", status: "doing" } };
   const post = (body = input, key = randomUUID(), from = origin) => fetch(`${origin}/api/tasks`, {
     method: "POST", signal: AbortSignal.timeout(15000), headers: { origin: from, "content-type": "application/json",
@@ -891,7 +909,13 @@ try {
         lifecycleScenario: process.argv.includes("--browser-lifecycle") && (async driver => {
           await put({ ...(await get(grant.id)), childWorkspaceWrites: true, workspaceMutations: ["CREATE", "UPDATE", "DELETE"] });
           const { checkChromeLifecycle } = await import("../tests/helpers/chrome-workspace-lifecycle.mjs");
-          const result = await checkChromeLifecycle(driver, { origin, get });
+          const result = await checkChromeLifecycle(driver, { origin, get, restart: process.argv.includes("--restart-server") && (async () => {
+            const previousPid = child.pid;
+            await stopServer();
+            await assert.rejects(view());
+            await startServer();
+            assert.notEqual(child.pid, previousPid);
+          }) });
           console.log(JSON.stringify({ phase5D4: result }));
         }) });
       console.log(JSON.stringify({ chromeAcceptance: result }));
@@ -905,18 +929,7 @@ try {
 } finally {
   try {
     if (proxy) await close(proxy);
-    if (child?.pid && child.exitCode === null) {
-      const stopped = once(child, "exit");
-      if (process.platform === "win32") {
-        const stopTree = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-        const [code] = await once(stopTree, "exit");
-        if (code !== 0) {
-          await Promise.race([stopped, delay(1000)]);
-          if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-        }
-      } else child.kill("SIGTERM");
-      await stopped;
-    }
+    await stopServer();
     if (created) {
       await client.send(new DeleteTableCommand({ TableName: tableName }));
       await waitUntilTableNotExists({ client, maxWaitTime: 30 }, { TableName: tableName });

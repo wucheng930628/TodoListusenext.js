@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
-export async function checkChromeLifecycle({ send, evaluate, until, activate, requests, text }, { origin, get }) {
+export async function checkChromeLifecycle({ send, evaluate, until, activate, requests, responses, text }, { origin, get, restart }) {
+  const firstRequest = requests.length;
+  const firstResponse = responses.length;
   const path = (resource, id) => `/api/${resource}/${encodeURIComponent(id)}`;
   const view = id => path("workspaces", id) + "/view";
   const heading = name => `document.querySelector('h1')?.textContent === ${JSON.stringify(name)}`;
@@ -177,6 +179,21 @@ export async function checkChromeLifecycle({ send, evaluate, until, activate, re
   assert.ok(await evaluate("document.querySelector('.board-link').innerText.includes('D4 A first board')"));
   assert.ok(await evaluate("document.querySelector('.dashboard-widget textarea').value==='D4 A updated note'"));
   assert.deepEqual(await storage(), savedLocal);
+  if (restart) {
+    const beforeRestart = [last, await read(b.id)];
+    const ids = beforeRestart.flatMap(snapshot => [snapshot.workspace.id,
+      ...snapshot.boards.flatMap(({ board, tasks, widgets }) => [board.id, ...tasks.map(row => row.id), ...widgets.map(row => row.id)])]);
+    const records = await Promise.all(ids.map(get));
+    await restart();
+    assert.deepEqual(await Promise.all(ids.map(get)), records);
+    await reload();
+    for (const before of beforeRestart) {
+      const after = await read(before.workspace.id);
+      assert.deepEqual(after.workspace, before.workspace);
+      assert.deepEqual(after.boards, before.boards);
+    }
+    await until("!!document.querySelector('time[datetime=\"2026-12-02\"]')");
+  }
 
   for (const workspace of [a, b]) {
     const snapshot = await read(workspace.id);
@@ -193,5 +210,29 @@ export async function checkChromeLifecycle({ send, evaluate, until, activate, re
     await http("GET", view(workspace.id), null, 404);
     assert.equal(await get(workspace.id), undefined);
   }
-  return { workspaces: 2, boards: 4, tasks: 4, widgets: 4, reloads: 2, lateResponseIgnored: true, isolatedSources: true, cleanup: true };
+  const writes = requests.slice(firstRequest).filter(request => ["POST", "PATCH", "DELETE"].includes(request.method) && request.url.includes("/api/"));
+  const successful = new Map(responses.slice(firstResponse).filter(response => response.status >= 200 && response.status < 300)
+    .map(response => [new Headers(response.headers).get("operation-id"), response]));
+  let receipts = 0;
+  for (const request of writes) {
+    const key = new Headers(request.headers).get("idempotency-key");
+    assert.ok(key);
+    if (JSON.parse(request.postData).data?.id === "foreign-task") {
+      assert.equal(await get(`SLOWLY#CRUD_OPERATION#${key}`), undefined);
+      continue;
+    }
+    assert.ok(successful.has(key), `Missing HTTP confirmation for ${request.method} ${request.url}`);
+    const receipt = await get(`SLOWLY#CRUD_OPERATION#${key}`);
+    const resource = new URL(request.url).pathname.split("/")[2];
+    const action = request.url.endsWith("/order") ? "ORDER" : { POST: "CREATE", PATCH: "UPDATE", DELETE: "DELETE" }[request.method];
+    assert.equal(receipt.state, "CONFIRMED");
+    assert.equal(receipt.resource, resource);
+    assert.equal(receipt.action, action);
+    if (action === "DELETE") assert.equal(receipt.result, null);
+    else if (action === "ORDER") assert.ok(receipt.result.every(row => Number.isSafeInteger(row.version)));
+    else assert.ok(receipt.result.version >= 1);
+    receipts++;
+  }
+  return { workspaces: 2, boards: 4, tasks: 4, widgets: 4, reloads: restart ? 3 : 2, receipts,
+    serverRestarted: Boolean(restart), lateResponseIgnored: true, isolatedSources: true, cleanup: true };
 }
