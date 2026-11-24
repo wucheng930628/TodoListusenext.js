@@ -3,7 +3,7 @@ import { DataError, assertId as assertModelId, fromFrontend, requireValue } from
 import { assertOperationKey } from "../crud-operation.mjs";
 
 const definitions = {
-  workspaces: { type: "WORKSPACE", singular: "Workspace", fields: ["activeBoardId", "settings"] },
+  workspaces: { type: "WORKSPACE", singular: "Workspace", fields: ["activeBoardId", "settings", "name", "description"] },
   boards: { type: "BOARD", singular: "Board", fields: ["id", "name", "description", "wipLimit", "analyticsSize", "settings"] },
   tasks: { type: "TASK", singular: "Task", fields: ["id", "title", "description", "status", "tag", "priority", "urgent", "date", "time", "subtasks", "notes"] },
   widgets: { type: "WIDGET", singular: "Widget", fields: ["id", "type", "span", "height", "manualSize", "config"] },
@@ -105,6 +105,10 @@ function validatePatch(resource, data, creating) {
     requireValue(Object.values(data.analyticsSize).every(value => Number.isFinite(value) && value > 0 && value <= 10000), "Invalid analytics size");
   }
   if (data.settings !== undefined) object(data.settings);
+  if (resource === "workspaces") {
+    requireValue(data.name === undefined || typeof data.name === "string" && data.name.trim().length > 0 && data.name.length <= 100, "Invalid Workspace name");
+    requireValue(data.description === undefined || typeof data.description === "string" && data.description.length <= 1000, "Invalid Workspace description");
+  }
   if (data.config !== undefined) keys(data.config, ["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
 }
 export function dto(item) {
@@ -150,11 +154,11 @@ export function createApi(resource, { getRepository, configuration = () => proce
     let authority;
     let key;
     if (authorizeMutation) {
-      assertId(input.workspaceId, "WORKSPACE");
+      if (resource !== "workspaces") assertId(input.workspaceId, "WORKSPACE");
       key = request.headers.get("idempotency-key");
-      requireValue(!["boards", "widgets"].includes(resource) || action !== "DELETE" || key !== null, "Deletion requires an operation key");
+      requireValue(resource === "tasks" || action !== "DELETE" || key !== null, "Deletion requires an operation key");
       if (key !== null) assertOperationKey(key);
-      authority = await authorizeMutation(input.workspaceId, action);
+      authority = await authorizeMutation(resource === "workspaces" ? id : input.workspaceId, action, key);
       requireValue(authority, "Mutation is not authorized", "FORBIDDEN");
     }
     const repo = await getRepository();
@@ -189,8 +193,8 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (operationKey !== null) assertOperationKey(operationKey);
       let authority;
       if (authorizeCreate) {
-        requireValue(operationKey !== null && input.position !== undefined, "Create requires an operation key and position");
-        assertId(input.workspaceId, "WORKSPACE");
+        requireValue(operationKey !== null && (resource === "workspaces" || input.position !== undefined), "Create requires an operation key and child position");
+        if (resource !== "workspaces") assertId(input.workspaceId, "WORKSPACE");
         authority = await authorizeCreate(input.workspaceId);
         requireValue(authority, "Create is not authorized", "FORBIDDEN");
         if (resource === "widgets") validateWidgetConfigType(data.type, data.config);
@@ -238,7 +242,7 @@ export function createApi(resource, { getRepository, configuration = () => proce
         }
         if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
         let item;
-        if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
+        if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version, authority, operation);
         else if (resource === "boards") item = await repo.updateBoard(id, data, input.version, authority, operation);
         else if (resource === "tasks") item = await repo.updateTask(input.boardId, id, data, input.version, authority, operation);
         else item = await repo.updateWidget(input.boardId, id, data, input.version, authority, operation);
@@ -246,16 +250,17 @@ export function createApi(resource, { getRepository, configuration = () => proce
       });
     }),
     itemDelete: wrap(async (request, context) => {
-      requireValue(resource !== "workspaces", "Workspace deletion is unsupported", "NOT_SUPPORTED");
+      requireValue(resource !== "workspaces" || authorizeMutation, "Workspace deletion is unsupported", "NOT_SUPPORTED");
       const id = await idFrom(context); query(request, []); const input = await body(request);
       keys(input, ["version", ...scopeKeys]); version(input.version);
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
-      else assertId(input.boardId, "BOARD");
+      else if (resource !== "workspaces") assertId(input.boardId, "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
       return mutation("DELETE", request, id, input, async (repo, authority, operation) => {
         const item = await repo[`get${singular}`](id);
         await assertScope(repo, item, input, true);
-        if (resource === "boards") await repo.deleteBoard(id, input.version, authority, operation);
+        if (resource === "workspaces") await repo.deleteWorkspace(id, input.version, authority, operation);
+        else if (resource === "boards") await repo.deleteBoard(id, input.version, authority, operation);
         else if (resource === "tasks") await repo.deleteTask(input.boardId, id, input.version, authority, operation);
         else await repo.deleteWidget(input.boardId, id, input.version, authority, operation);
         return null;

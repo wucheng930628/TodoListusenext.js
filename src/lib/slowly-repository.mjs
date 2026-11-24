@@ -1,5 +1,5 @@
 import "server-only";
-import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand, ScanCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { DataError, INDEX_NAME, assertId, assertItemSize, fromFrontend, makeItem, requireValue, validateData } from "./data-model.mjs";
 import { assertOperationKey, createOperation, assertSameOperation, createReceipt, createMutationOperation, workspaceCreateScope } from "./crud-operation.mjs";
 
@@ -27,7 +27,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const roots = new Set(actions.filter(action => action.Put).map(action => action.Put.Item.entityType === "WORKSPACE" ? action.Put.Item.id : action.Put.Item.workspaceId).filter(Boolean));
     requireValue(roots.size <= 1, "A write cannot span workspaces");
     for (const workspaceId of roots) {
-      if (actions.some(action => action.Put?.Item.id === workspaceId)) continue; // Existing root Put already checks lock atomically.
+      if (actions.some(action => action.Put?.Item.id === workspaceId || action.Delete?.Key.id === workspaceId)) continue; // Root mutation already checks version and lock atomically.
       const workspace = await get("WORKSPACE", workspaceId);
       requireValue(workspace.migrationLock !== true, "Workspace migration barrier is held", "MIGRATION_LOCKED");
       requireValue(!Object.hasOwn(workspace, "migrationOwner") || workspace.migrationReleaseVersion === 2, "Workspace release protocol is not certified", "MIGRATION_LOCKED");
@@ -68,18 +68,20 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return item;
   }
   async function createOnce(resource, input, key, authority) {
-    if (authority) requireValue(["tasks", "boards", "widgets"].includes(resource) && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
+    if (authority) requireValue(resource === "workspaces" ? authority.workspaceGrantId :
+      ["tasks", "boards", "widgets"].includes(resource) && input.workspaceId === authority.workspaceId, "Authorization scope differs", "FORBIDDEN");
     const operation = createOperation(resource, input, key);
     const data = fromFrontend(operation.type, input.data);
     const replay = receipt => {
       assertSameOperation(receipt, operation);
+      if (authority && resource === "workspaces") requireValue(receipt.workspaceGrantId === authority.workspaceGrantId, "Workspace receipt scope differs", "FORBIDDEN");
       return { item: structuredClone(receipt.result), replayed: receipt.attemptId !== operation.attemptId };
     };
     const previous = await readReceipt(key);
     if (previous) return replay(previous);
     try {
       let item;
-      if (resource === "workspaces") item = await createWorkspace(data, operation);
+      if (resource === "workspaces") item = await createWorkspace(data, operation, authority);
       else if (resource === "boards") item = await createBoard(input.workspaceId, data, input.position, operation, authority);
       else {
         const board = await get("BOARD", input.boardId);
@@ -101,7 +103,9 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     const workspaceCreate = scope.resource === "workspaces";
     requireValue(receipt.entityType === "CRUD_OPERATION" && receipt.schemaVersion === 1 && receipt.state === "CONFIRMED" &&
       receipt.resource === scope.resource && (workspaceCreate
-        ? scope.scope === workspaceCreateScope && receipt.parentScope === workspaceCreateScope
+        ? (scope.workspaceGrantId === undefined || receipt.workspaceGrantId === scope.workspaceGrantId) && (scope.scope === workspaceCreateScope
+          ? receipt.action === "CREATE" && receipt.parentScope === workspaceCreateScope
+          : ["UPDATE", "DELETE"].includes(receipt.action) && receipt.workspaceId === scope.workspaceId && receipt.targetId === scope.workspaceId)
         : receipt.workspaceId === scope.workspaceId && (scope.resource === "boards" || receipt.boardId === scope.boardId)),
     "Operation scope does not match", "OPERATION_CONFLICT");
     return receipt;
@@ -130,14 +134,51 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     } while (cursor);
     return items.filter(item => item.entityType === type && item.parentId === parent).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
   }
-  async function createWorkspace(data, operation) {
+  async function createWorkspace(data, operation, authority) {
     const item = { ...makeItem("WORKSPACE", data, { now: clock() }), viewOrigin: "api", boardCount: 0 };
-    return commitCreate(item, [put(item)], operation);
+    if (authority) {
+      requireValue(data.activeBoardId === undefined || data.activeBoardId === "", "A new Workspace has no active Board");
+      item.workspaceGrantId = authority.workspaceGrantId;
+    }
+    return commitCreate(item, [put(item)], operation, authority);
   }
-  async function saveWorkspace(id, data, version) {
+  async function saveWorkspace(id, data, version, authority, operation) {
     const previous = await get("WORKSPACE", id); expected(previous, version);
+    if (authority) {
+      requireValue(id === authority.workspaceId, "Workspace mismatch", "OWNERSHIP");
+      expected(previous, authority.workspaceVersion);
+      if (data.activeBoardId !== undefined && data.activeBoardId !== "") {
+        const indexed = await list("BOARD", id);
+        requireValue(indexed.length === previous.boardCount, "Board index is catching up", "CONFLICT");
+        const matching = indexed.filter(board => board.data.id === data.activeBoardId);
+        requireValue(matching.length === 1, "Active Board does not belong to this Workspace", "VALIDATION");
+        const board = await get("BOARD", matching[0].id);
+        requireValue(board.workspaceId === id && board.parentId === id && board.data.id === data.activeBoardId, "Active Board changed", "CONFLICT");
+      }
+    }
     const item = revised(previous, { data: validateData("WORKSPACE", data) });
-    await commit([put(item, previous)]); return item;
+    const actions = [put(item, previous)];
+    if (operation) actions.push(put(createReceipt(operation, item, clock())));
+    await commit(actions, authority); return item;
+  }
+  async function deleteWorkspace(id, version, authority, operation) {
+    const workspace = await get("WORKSPACE", id);
+    expected(workspace, version);
+    requireValue(authority?.workspaceId === id && operation?.action === "DELETE", "Workspace deletion is not authorized", "FORBIDDEN");
+    expected(workspace, authority.workspaceVersion);
+    requireValue(workspace.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
+    requireValue(workspace.boardCount === 0, "Only empty Workspaces may be deleted", "NOT_EMPTY");
+    requireValue(!workspace.migrationOwner && workspace.workspaceGrantId === authority.workspaceGrantId, "Only owned, non-migrated Workspaces may be deleted", "FORBIDDEN");
+    let cursor;
+    do {
+      const page = await db.send(new ScanCommand({ TableName: tableName, ConsistentRead: true, ExclusiveStartKey: cursor,
+        FilterExpression: "(#workspace = :id OR #parent = :id OR #release = :id) AND (attribute_not_exists(#type) OR #type <> :receipt)",
+        ExpressionAttributeNames: { "#workspace": "workspaceId", "#parent": "parentId", "#release": "releaseWorkspaceId", "#type": "entityType" },
+        ExpressionAttributeValues: { ":id": id, ":receipt": "CRUD_OPERATION" } }));
+      requireValue(!page.Items?.length, "Workspace still has related data", "NOT_EMPTY");
+      cursor = page.LastEvaluatedKey;
+    } while (cursor);
+    await commit([remove(workspace), put(createReceipt(operation, workspace, clock()))], authority);
   }
   async function createBoard(workspaceId, data, position = 0, operation, authority) {
     const parent = await get("WORKSPACE", workspaceId);
@@ -258,7 +299,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
   }
   return {
     createOnce, getOperation, mutateOnce,
-    createWorkspace, getWorkspace: id => get("WORKSPACE", id), saveWorkspace,
+    createWorkspace, getWorkspace: id => get("WORKSPACE", id), saveWorkspace, deleteWorkspace,
     createBoard, getBoard: id => get("BOARD", id), updateBoard, deleteBoard,
     listBoards: id => list("BOARD", id), listTasks: id => list("TASK", id), listWidgets: id => list("WIDGET", id),
     getTask: id => get("TASK", id), getWidget: id => get("WIDGET", id),

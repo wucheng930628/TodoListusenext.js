@@ -35,17 +35,19 @@ export function assertSameOperation(receipt, operation) {
 export function createMutationOperation(resource, action, targetId, input, key) {
   assertOperationKey(key);
   requireValue(resource === "tasks" && ["UPDATE", "DELETE"].includes(action) ||
-    ["boards", "widgets"].includes(resource) && ["UPDATE", "DELETE", "ORDER"].includes(action), "Unsupported mutation");
+    ["boards", "widgets"].includes(resource) && ["UPDATE", "DELETE", "ORDER"].includes(action) ||
+    resource === "workspaces" && ["UPDATE", "DELETE"].includes(action), "Unsupported mutation");
   // Keep the existing Task fingerprint for previously stored receipts.
   const fingerprint = createHash("sha256").update(canonical({ protocol: 1, action, targetId, input,
     ...(resource !== "tasks" ? { resource } : {}) })).digest("hex");
   return { id: `SLOWLY#CRUD_OPERATION#${key}`, operationId: key, attemptId: randomUUID(), action,
-    resource, type: types[resource], parentScope: resource === "boards" ? input.workspaceId : input.boardId, fingerprint, targetId };
+    resource, type: types[resource], parentScope: resource === "workspaces" ? targetId : resource === "boards" ? input.workspaceId : input.boardId, fingerprint, targetId };
 }
 
 export function createReceipt(operation, target, now, result = operation.action === "DELETE" ? null : target) {
   const receipt = { ...operation, entityType: "CRUD_OPERATION", schemaVersion: 1, state: "CONFIRMED", createdAt: now,
     workspaceId: target.entityType === "WORKSPACE" ? target.id : target.workspaceId,
+    ...(target.workspaceGrantId ? { workspaceGrantId: target.workspaceGrantId } : {}),
     ...(target.boardId ? { boardId: target.boardId } : operation.resource === "widgets" && operation.action === "ORDER" ? { boardId: target.id } : {}), result };
   assertItemSize(receipt);
   return receipt;

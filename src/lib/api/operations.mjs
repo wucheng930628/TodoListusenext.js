@@ -13,14 +13,16 @@ export function createOperationApi({ getRepository, configuration = () => proces
       const scope = query(request, ["resource", "workspaceId", "boardId", "scope"]);
       requireValue(["workspaces", "boards", "tasks", "widgets"].includes(scope.resource), "Resource required");
       if (scope.resource === "workspaces") {
-        requireValue(scope.scope === workspaceCreateScope && scope.workspaceId === undefined && scope.boardId === undefined, "Workspace create scope required");
+        requireValue(scope.boardId === undefined, "Unexpected Board scope");
+        if (scope.scope === workspaceCreateScope) requireValue(scope.workspaceId === undefined, "Workspace create scope required");
+        else { requireValue(authorizeScope && scope.scope === undefined, "Workspace create scope required"); assertApiId(scope.workspaceId, "WORKSPACE"); }
       } else {
         assertApiId(scope.workspaceId, "WORKSPACE");
         requireValue(scope.scope === undefined, "Unexpected scope");
         if (["tasks", "widgets"].includes(scope.resource)) assertApiId(scope.boardId, "BOARD");
         else requireValue(scope.boardId === undefined, "Unexpected board");
       }
-      if (authorizeScope) await authorizeScope(scope);
+      if (authorizeScope) Object.assign(scope, await authorizeScope(scope, operationId));
       const receipt = await (await getRepository()).getOperation(operationId, scope);
       if (!receipt) return Response.json({ error: { code: "OPERATION_NOT_FOUND", state: "NOT_FOUND", message: "No confirmed receipt is visible. The create outcome remains unknown." } }, { status: 404, headers });
       return Response.json({ data: { operationId, state: "CONFIRMED", resource: receipt.resource, workspaceId: receipt.workspaceId,

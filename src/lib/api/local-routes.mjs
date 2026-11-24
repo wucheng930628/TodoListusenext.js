@@ -11,13 +11,17 @@ export function localRoutes(resource) {
     if (controlledBinding()) return (await controlledEnvironment()).repository;
     return (await import("../slowly.mjs")).slowly;
   } });
-  if (!["tasks", "boards", "widgets"].includes(resource)) return handlers;
+  if (!["tasks", "boards", "widgets", "workspaces"].includes(resource)) return handlers;
   const isolatedWrite = (action, controlledHandler) => async (request, context) => {
     if (process.env.SLOWLY_PHASE5_B1_TABLE) return isolatedTaskRoute(action, request, context);
     if (process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_CONTROLLED_UI_RUN_ID) return controlledHandler(request, context);
     return Response.json({ error: { code: "FORBIDDEN", message: "Write requires an isolated authorization scope." } },
       { status: 403, headers: { "Cache-Control": "no-store" } });
   };
+  if (resource === "workspaces") return { ...handlers,
+    collectionPost: (request, context) => process.env.SLOWLY_PHASE5_B1_TABLE ? isolatedTaskRoute("workspacePost", request, context) : handlers.collectionPost(request, context),
+    itemPatch: (request, context) => process.env.SLOWLY_PHASE5_B1_TABLE ? isolatedTaskRoute("workspacePatch", request, context) : handlers.itemPatch(request, context),
+    itemDelete: (request, context) => process.env.SLOWLY_PHASE5_B1_TABLE ? isolatedTaskRoute("workspaceDelete", request, context) : handlers.itemDelete(request, context) };
   if (resource === "boards") return { ...handlers, collectionPost: isolatedWrite("boardPost", handlers.collectionPost),
     itemPatch: isolatedWrite("boardPatch", handlers.itemPatch), itemDelete: isolatedWrite("boardDelete", handlers.itemDelete),
     orderPatch: isolatedWrite("boardOrder", handlers.orderPatch) };
