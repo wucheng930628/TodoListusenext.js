@@ -275,11 +275,9 @@ export function createApi(resource, { getRepository, configuration = () => proce
       const parent = resource === "boards" ? input.workspaceId : input.boardId;
       assertId(parent, resource === "boards" ? "WORKSPACE" : "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
-      if (resource === "boards" && authorizeMutation) {
-        return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo.reorderBoards(parent, input.entries, authority, operation));
-      }
-      if (resource === "widgets" && authorizeMutation) {
-        return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo.reorderWidgets(parent, input.entries, authority, operation));
+      if (authorizeMutation) {
+        if (resource === "tasks") requireValue(request.headers.has("idempotency-key"), "Task ordering requires an operation key");
+        return mutation("ORDER", request, parent, input, (repo, authority, operation) => repo[`reorder${singular}s`](parent, input.entries, authority, operation));
       }
       const repo = await getRepository();
       if (resource !== "boards") await scopedBoard(repo, parent, input.workspaceId);

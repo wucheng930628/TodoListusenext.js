@@ -824,8 +824,8 @@ try {
     async function setBrowserGrant(enabled) {
       const current = await get(grant.id);
       await put({ ...current, version: current.version + 1,
-        taskMutations: enabled ? ["UPDATE", "DELETE"] : [],
-        boardMutations: ["CREATE", "UPDATE", "DELETE"], widgetMutations: ["CREATE", "UPDATE", "DELETE"],
+        taskMutations: enabled ? ["UPDATE", "DELETE", "ORDER"] : [],
+        boardMutations: ["CREATE", "UPDATE", "DELETE", "ORDER"], widgetMutations: ["CREATE", "UPDATE", "DELETE", "ORDER"],
         workspaceMutations: ["CREATE"] });
     }
     if (checkChromeWrite) await setBrowserGrant(true);
@@ -849,11 +849,45 @@ try {
       const result = await checkChromeRead({ origin, workspaceId, secondWorkspaceId: other.id, expectedBoardName: stable.data.name,
         deniedId: `SLOWLY#WORKSPACE#${randomUUID()}`,
         injectConflict: enabled => put(enabled ? { ...stable, taskCount: stable.taskCount + 1 } : stable),
-        writeScenario: checkChromeWrite && (driver => checkChromeWrite(driver, {
-          origin, workspaceId, view: async () => (await expect(view(), 200)).body.data,
-          setGrant: setBrowserGrant,
-          changeTaskVersion: async id => { const task = await get(id); await put({ ...task, version: task.version + 1 }); },
-        })) });
+        writeScenario: checkChromeWrite && (async driver => {
+          const options = { origin, workspaceId, view: async () => (await expect(view(), 200)).body.data,
+            setGrant: setBrowserGrant,
+            changeTaskVersion: async id => { const task = await get(id); await put({ ...task, version: task.version + 1 }); } };
+          await checkChromeWrite(driver, options);
+          const { checkChromeOrder } = await import("../tests/helpers/chrome-order-acceptance.mjs");
+          const extraBoard = (await expect(fetchWrite("/api/boards", { workspaceId, position: 20, data: { id: "d3-board", name: "D3 Board", description: "", wipLimit: 4 } }), 201)).body.data;
+          await expect(fetchWrite("/api/widgets", { workspaceId, boardId, position: 2000,
+            data: { id: "d3-widget", type: "analytics", span: 6, height: 240, config: {} } }), 201);
+          await checkChromeOrder(driver, { ...options, boardId, extraBoardId: extraBoard.id,
+            replay: request => fetch(request.url, { method: "PATCH", headers: {
+              origin, "content-type": "application/json", "idempotency-key": new Headers(request.headers).get("idempotency-key"),
+            }, body: request.postData }),
+            assertStored: async rows => {
+              for (const row of rows) {
+                const stored = await get(row.id);
+                assert.equal(stored.version, row.version);
+                assert.equal(stored.position, row.position);
+                assert.deepEqual(stored.data, row.data);
+              }
+            } });
+          const latest = (await expect(view(), 200)).body.data;
+          const current = latest.boards.find(row => row.board.id === boardId);
+          assert.equal((await get(workspaceId)).boardCount, latest.boards.length);
+          const storedBoard = await get(boardId);
+          assert.equal(storedBoard.taskCount, current.tasks.length);
+          assert.equal(storedBoard.widgetCount, current.widgets.length);
+          assert.equal(storedBoard.doingCount, current.tasks.filter(row => row.data.status === "doing").length);
+          const target = current.widgets.find(row => row.data.id === "d3-widget");
+          const edits = [260, 280].map(height => fetch(`${origin}/api/widgets/${encodeURIComponent(target.id)}`, {
+            method: "PATCH", headers: { origin, "content-type": "application/json", "idempotency-key": randomUUID() },
+            body: JSON.stringify({ workspaceId, boardId, version: target.version, data: { height } }),
+          }));
+          const results = await Promise.all(edits);
+          assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+          assert.equal((await get(target.id)).version, target.version + 1);
+          assert.equal((await get(boardId)).version, storedBoard.version + 1);
+          console.log("PASS D3 Chrome ordering, replay, conflict, offline receipt and reload");
+        }) });
       console.log(JSON.stringify({ chromeAcceptance: result }));
     });
   }

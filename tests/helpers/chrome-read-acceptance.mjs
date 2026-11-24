@@ -28,6 +28,9 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
       const message = JSON.parse(raw);
       if (message.method === "Network.requestWillBeSent") requests.push(message.params.request);
       if (message.method === "Network.responseReceived") responses.push(message.params.response);
+      if (message.method === "Page.javascriptDialogOpening" && message.params.type === "beforeunload") {
+        void send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {});
+      }
       const finish = pending.get(message.id);
       if (finish) finish(message);
     }

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { defaultWidgetLayout, reorderWidgets, widgetCatalog, WidgetContent, WidgetSettings } from "./widgets";
 import { widgetConfigForTypeChange } from "../lib/client/main-view-model.mjs";
 import "./widget-dashboard.css";
+import { apiErrorMessage } from "../lib/client/api-error-message.mjs";
 
 const dragType = "application/x-slowly-widget";
 
@@ -130,9 +131,9 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
     if (asyncMode && !ready) { setMessage("目前唯讀或仍有操作進行。"); return false; }
     try {
       const result = onChange(update, options);
-      if (result?.then) return result.then(() => { setMessage(message); return true; }, error => { setMessage(error.message); return false; });
+      if (result?.then) return result.then(() => { setMessage(message); return true; }, error => { setMessage(apiErrorMessage(error)); return false; });
       return true;
-    } catch (error) { setMessage(error.message); return false; }
+    } catch (error) { setMessage(apiErrorMessage(error)); return false; }
   }
 
   useEffect(() => {

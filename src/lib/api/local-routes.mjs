@@ -29,7 +29,8 @@ export function localRoutes(resource) {
     itemPatch: isolatedWrite("widgetPatch", handlers.itemPatch), itemDelete: isolatedWrite("widgetDelete", handlers.itemDelete),
     orderPatch: isolatedWrite("widgetOrder", handlers.orderPatch) };
   return { ...handlers, collectionPost: isolatedWrite("post", handlers.collectionPost),
-    itemPatch: isolatedWrite("patch", handlers.itemPatch), itemDelete: isolatedWrite("delete", handlers.itemDelete) };
+    itemPatch: isolatedWrite("patch", handlers.itemPatch), itemDelete: isolatedWrite("delete", handlers.itemDelete),
+    orderPatch: isolatedWrite("taskOrder", handlers.orderPatch) };
 }
 
 export async function isolatedTaskRoute(action, request, context) {

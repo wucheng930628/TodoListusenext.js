@@ -270,18 +270,19 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(Array.isArray(entries) && entries.length > 0 && entries.length <= (type === "BOARD" ? 99 : 98) && new Set(entries.map(entry => entry.id)).size === entries.length, "Order exceeds atomic capacity (boards: 99; children: 98)");
     const parent = await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parentId);
     if (authority) {
-      requireValue(type === "BOARD" ? parentId === authority.workspaceId : type === "WIDGET" && parent.workspaceId === authority.workspaceId,
+      requireValue(type === "BOARD" ? parentId === authority.workspaceId : parent.workspaceId === authority.workspaceId,
         "Workspace mismatch", "OWNERSHIP");
       if (type === "BOARD") expected(parent, authority.workspaceVersion);
       const maxEntries = (type === "BOARD" ? 97 : 96) - Number(Boolean(operation));
       requireValue(entries.length <= maxEntries && new Set(entries.map(entry => entry.position)).size === entries.length,
         "Invalid or over-capacity order");
-      requireValue(entries.length === (type === "BOARD" ? parent.boardCount : parent.widgetCount), "Order must include every item", "CONFLICT");
+      const count = { BOARD: "boardCount", TASK: "taskCount", WIDGET: "widgetCount" }[type];
+      requireValue(entries.length === parent[count], "Order must include every item", "CONFLICT");
     }
     const items = await Promise.all(entries.map(async entry => {
       const old = await get(type, entry.id); expected(old, entry.version);
       requireValue(old.parentId === parentId, "Entity belongs to a different parent", "OWNERSHIP");
-      if (authority && type === "WIDGET") requireValue(old.boardId === parentId && old.workspaceId === authority.workspaceId, "Widget scope differs", "OWNERSHIP");
+      if (authority && type !== "BOARD") requireValue(old.boardId === parentId && old.workspaceId === authority.workspaceId, "Child scope differs", "OWNERSHIP");
       requireValue(Number.isSafeInteger(entry.position) && entry.position >= 0 && entry.position <= 999999999999, "Invalid position");
       return { old, item: revised(old, { position: entry.position, gsi1sk: `${type}#${String(entry.position).padStart(12, "0")}#${old.id}` }) };
     }));
@@ -314,7 +315,7 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     updateWidget: (boardId, id, data, version, authority, operation) => childChange("WIDGET", boardId, id, data, version, undefined, false, operation, authority),
     deleteWidget: (boardId, id, version, authority, operation) => childChange("WIDGET", boardId, id, null, version, undefined, false, operation, authority),
     reorderBoards: (id, entries, authority, operation) => reorder("BOARD", id, entries, authority, operation),
-    reorderTasks: (id, entries) => reorder("TASK", id, entries),
+    reorderTasks: (id, entries, authority, operation) => reorder("TASK", id, entries, authority, operation),
     reorderWidgets: (id, entries, authority, operation) => reorder("WIDGET", id, entries, authority, operation),
   };
 }

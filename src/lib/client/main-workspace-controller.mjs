@@ -87,8 +87,8 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       if (current !== epoch) return null;
       if (receipt.state === "CONFIRMED") {
         // Refresh current server state, including later edits or deletion. Never merge the original create DTO.
-        await refresh();
-        if (createIntent !== intent || state.mode !== "api" || state.workspaceId !== intent.scope.workspaceId || state.status !== "success") return null;
+        const loaded = await refreshAfterReceipt();
+        if (!loaded || createIntent !== intent || state.mode !== "api" || state.workspaceId !== intent.scope.workspaceId || state.status !== "success") return null;
         await journal.clear(intent.operationKey);
         createIntent = null; recoveryRecord = null;
         publish({ uncertainWrite: false, mutation: "success", error: null, recoveredCreateRevision: state.recoveredCreateRevision + 1,
@@ -115,27 +115,42 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     finally { pending = false; publish({ mutation: "not-confirmed", uncertainWrite: true }); }
     return recoverCreate();
   }
+  function refreshAfterReceipt() {
+    return activating ? read() : refresh();
+  }
   async function recoverMutation() {
     const record = recoveryRecord;
     if (!record?.receiptScope || pending || state.checkingMutation || state.mode !== "api" || state.workspaceId !== record.workspaceId) {
       throw error("RECOVERY_REQUIRED", "請切回原 Workspace，再查詢操作結果。");
     }
     publish({ checkingMutation: true, allowWrites: false });
+    const lookupEpoch = epoch;
     try {
       const result = await api.getOperation(record.token, record.receiptScope);
+      if (epoch !== lookupEpoch || recoveryRecord !== record) return null;
       if (result.state === "NOT_FOUND") { publish({ error: error("OPERATION_UNKNOWN", "尚未查到收據，操作結果仍不明。") }); return result; }
-      if (result.state !== "CONFIRMED" || result.operationId !== record.token || result.action !== record.action.toUpperCase() ||
+      const receiptAction = record.action === "reorder" ? "ORDER" : record.action.toUpperCase();
+      if (result.state !== "CONFIRMED" || result.operationId !== record.token || result.action !== receiptAction ||
         result.resource !== record.receiptScope.resource || result.workspaceId !== record.workspaceId || result.boardId !== record.receiptScope.boardId ||
-        result.targetId !== record.receiptTarget || (record.action === "delete" ? result.result !== null : result.result?.id !== record.receiptTarget)) {
+        result.targetId !== record.receiptTarget || !matchesMutationResult(record, result.result)) {
         throw error("INVALID_RECEIPT", "操作收據與原始請求不一致。");
       }
-      if (!await refresh() || recoveryRecord !== record) return null;
+      if (!await refreshAfterReceipt() || recoveryRecord !== record) return null;
       await journal.clear(record.token); recoveryRecord = null;
       publish({ uncertainWrite: false, mutation: "success", error: null });
       return result;
     } finally { publish({ checkingMutation: false }); }
   }
-  async function mutate(action, kind, invoke, merge, intent, ref) {
+  function matchesMutationResult(record, result) {
+    if (record.action === "delete") return result === null;
+    if (record.action !== "reorder") return result?.id === record.receiptTarget;
+    return Array.isArray(result) && result.length === record.orderEntries.length && record.orderEntries.every((entry, index) => {
+      const item = result[index];
+      return item?.id === entry.id && item.position === entry.position && item.version === entry.version + 1 &&
+        item.workspaceId === record.workspaceId && item.boardId === record.receiptScope.boardId;
+    });
+  }
+  async function mutate(action, kind, invoke, merge, intent, ref, orderEntries) {
     requireWritable();
     const projection = state.projection; const workspaceId = state.workspaceId; const boardId = state.activeBoardId; const current = ++epoch;
     readAbort?.abort(); writeAbort = new AbortController(); const signal = writeAbort.signal; pending = true;
@@ -144,7 +159,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       ...(intent ? { intent: intent.exportIntent() } : {}),
       ...(ref && projection.snapshot.readiness?.capabilities?.isolatedMutationReceipts === true ? {
         receiptScope: { resource: `${kind}s`, workspaceId, ...(ref.boardId ? { boardId: ref.boardId } : {}) },
-        receiptTarget: ref.databaseId,
+        receiptTarget: ref.databaseId, ...(orderEntries ? { orderEntries } : {}),
       } : {}) };
     publish({ mutation: "loading", error: null, operation: { action, kind } }); let result; let acknowledged = false; let claimed = false; let dispatched = false;
     try {
@@ -155,6 +170,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
       result = await invoke({ api, projection, workspaceId, boardId, signal, operationKey: record.receiptScope ? record.token : undefined });
       acknowledged = true;
       if (current !== epoch || signal.aborted) return result;
+      if (orderEntries && record.receiptScope && !matchesMutationResult(record, result)) throw error("INVALID_RECEIPT", "排序回應與原始請求不一致。");
       const snapshot = structuredClone(projection.snapshot); merge(snapshot, result);
       const nextProjection = projectMainView(snapshot, workspaceId);
       await journal.clear(record.token); recoveryRecord = null;
@@ -169,7 +185,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
         if (!claimed) journalReady = false;
         if (intent && !uncertain) createIntent = null;
         const authorityChanged = cause.code === "MIGRATION_LOCKED" || [403, 404].includes(cause.status);
-        const versionConflict = cause.status === 409 && cause.code === "CONFLICT";
+        const versionConflict = cause.status === 409 && ["CONFLICT", "VERSION_CONFLICT", "SNAPSHOT_NOT_READY"].includes(cause.code);
         publish({ mutation: uncertain ? "not-confirmed" : "error", error: cause, uncertainWrite: uncertain,
           ...(intent && uncertain ? { createRecovery: { operationKey: intent.operationKey, state: "UNKNOWN", checking: false } } : {}),
           ...(!journalReady || uncertain || authorityChanged || versionConflict || cause.code === "CUTOVER_REQUIRED" ? { allowWrites: false } : {}),
@@ -244,14 +260,17 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
   async function reorder(type, frontendIds) {
     requireWritable();
     const rows = type === "board" ? state.projection.workspace.boards : currentBoard()[type === "task" ? "tasks" : "widgets"] || [];
-    if (frontendIds.length !== rows.length || new Set(frontendIds).size !== rows.length || frontendIds.some(id => !rows.some(row => row.id === id)) || frontendIds.length > (type === "board" ? 99 : 98)) throw error("ORDER_UNSUPPORTED", "排序必須包含完整清單；看板最多 99 筆，任務／Widget 最多 98 筆。");
-    if (!frontendIds.length) return;
+    const protectedOrder = state.projection.snapshot.readiness?.capabilities?.isolatedMutationReceipts === true;
+    const maxEntries = (type === "board" ? 99 : 98) - (protectedOrder ? 3 : 0);
+    if (frontendIds.length !== rows.length || new Set(frontendIds).size !== rows.length || frontendIds.some(id => !rows.some(row => row.id === id)) || frontendIds.length > maxEntries) throw error("ORDER_UNSUPPORTED", `排序必須包含完整清單，且不得超過 ${maxEntries} 筆。`);
+    if (frontendIds.every((id, index) => rows[index].id === id)) return;
     const entries = frontendIds.map((id, position) => { const { ref } = entity(type, id); return { id: ref.databaseId, version: ref.version, position }; });
     const board = type === "board" ? null : reference(state.projection, "board", state.activeBoardId);
     const name = type[0].toUpperCase() + type.slice(1);
-    return mutate("reorder", type, ({ api, workspaceId, signal }) => api[`reorder${name}s`]({ workspaceId, ...(board ? { boardId: board.databaseId } : {}), entries }, { signal }), (snapshot, result) => {
+    const parent = { databaseId: board?.databaseId ?? state.workspaceId, boardId: board?.databaseId };
+    return mutate("reorder", type, ({ api, workspaceId, signal, operationKey }) => api[`reorder${name}s`]({ workspaceId, ...(board ? { boardId: board.databaseId } : {}), entries }, { signal, operationKey }), (snapshot, result) => {
       for (const record of result) { if (type === "board") entryFor(snapshot, record.id).board = record; else { const entry = entryFor(snapshot, board.databaseId); const key = type === "task" ? "tasks" : "widgets"; entry[key] = entry[key].map(item => item.id === record.id ? record : item); } }
-    });
+    }, null, parent, entries);
   }
   return {
     getSnapshot: () => state, getServerSnapshot: () => initial, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }, refresh, authorizeWrites, cancel, recoverCreate, resendCreate, recoverMutation,

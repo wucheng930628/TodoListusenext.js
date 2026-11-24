@@ -5,6 +5,7 @@ import { useMainWorkspace } from "../hooks/use-main-workspace.mjs";
 import { createMainUiSession } from "../lib/client/main-ui-session.mjs";
 import { captureVerifiedBackup, downloadBackupArtifact } from "../lib/client/verified-backup.mjs";
 import { createRecoveryJournal } from "../lib/client/recovery-journal.mjs";
+import { apiErrorMessage } from "../lib/client/api-error-message.mjs";
 
 const defaults = { development: process.env.NODE_ENV === "development" };
 export default function MainUi({ options = defaults, isolationEntry = false, isolatedWriteFixture = false }) {
@@ -23,7 +24,7 @@ export default function MainUi({ options = defaults, isolationEntry = false, iso
     return () => window.removeEventListener?.("beforeunload", protect);
   }, [controller]);
   const attempt = async fn => { setMessage(""); try { await fn(); } catch (error) {
-    if (controller.getSnapshot().error !== error) setMessage(error.status ? `${error.status} ${error.message}` : error.message);
+    if (controller.getSnapshot().error !== error) setMessage(error.status ? `${error.status} ${apiErrorMessage(error)}` : apiErrorMessage(error));
   } };
   async function backup() {
     try {
@@ -57,13 +58,16 @@ export default function MainUi({ options = defaults, isolationEntry = false, iso
       </details>
       {(state.activating || state.mode === "api") && <button type="button" onClick={controller.cancel}>取消等待</button>}
       {message && <p role="alert">{message}</p>}
-      {state.error && <p role="alert">{state.error.status ? `${state.error.status} ` : ""}{state.error.message}</p>}
+      {state.error && <p role="alert">{state.error.status ? `${state.error.status} ` : ""}{apiErrorMessage(state.error)}</p>}
       {state.mode === "localStorage" && state.startupStatus !== "ready" && <p role="alert">正在核對未確認操作；本機編輯暫停。{state.recoveryWorkspaceId && `請明確選擇 ${state.recoveryWorkspaceId} 以恢復。`}</p>}
       {(state.activating || state.mode === "api" && state.status === "loading") && <p role="status">讀取 API 資料中…</p>}
       {state.mode === "api" && state.status === "error" && state.projection && <p role="status">目前顯示上次成功讀取的 API 資料。</p>}
       {state.uncertainWrite && <p role="alert">寫入結果尚未確認，已暫停後續寫入。請先核對資料，不要重送新增。</p>}
       {state.mode === "api" && state.uncertainWrite && !state.createRecovery && (controller.recoveryDetails()?.receiptScope ?
-        <button type="button" disabled={state.checkingMutation} onClick={() => void attempt(controller.recoverMutation)}>查詢操作結果</button> : <>
+        <div>
+          <details><summary>未確認的操作資訊</summary><pre>{JSON.stringify(controller.recoveryDetails(), null, 2)}</pre></details>
+          <button type="button" disabled={state.checkingMutation} onClick={() => void attempt(controller.recoverMutation)}>查詢操作結果</button>
+        </div> : <>
         {effectiveOptions.readOnly && <label>確認 Workspace<input value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>}
         <button type="button" onClick={() => void attempt(async () => { if (window.confirm("已人工核對伺服器的更新／刪除／排序結果？此操作不會重送寫入。")) await controller.resolveUncertain(confirmation); })}>已人工核對未確認結果</button>
       </>)}

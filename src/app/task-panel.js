@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAsyncDraft } from "../hooks/use-async-draft.mjs";
 import "./task-panel.css";
+import { apiErrorMessage } from "../lib/client/api-error-message.mjs";
 
 export default function TaskPanel({ task, columns, onChange, onSave, onClose, onDelete, asyncMode = false, readOnly = false, onReloadLatest }) {
   const panel = useRef(null);
@@ -18,7 +19,7 @@ export default function TaskPanel({ task, columns, onChange, onSave, onClose, on
     if (saving || readOnly || !submitGate.start()) { setError("目前唯讀或仍在儲存中。"); return; }
     setError(""); flow.open(task.id || "new", task);
     try { await flow.save(async () => { const message = await action(); if (typeof message === "string" && message) throw new Error(message); }); }
-    catch (error) { setError(error.status === 409 ? "版本或 WIP 衝突；草稿已保留，請重新讀取後比對。" : error.outcome === "not-confirmed" ? "寫入結果不明，草稿已保留；請勿直接重送。" : error.message); }
+    catch (error) { setError(`${apiErrorMessage(error)} 草稿已保留。`); }
     finally { submitGate.finish(); }
   }
   const subtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
@@ -77,7 +78,7 @@ export default function TaskPanel({ task, columns, onChange, onSave, onClose, on
         <label>備註<textarea rows={4} maxLength={5000} placeholder="輸入備註（選填）" value={task.notes || ""} onChange={event => update("notes", event.target.value)} /></label>
       </fieldset>
       {error && <p className="task-panel-error" role="alert">{error}</p>}
-      {onReloadLatest && <button type="button" disabled={saving} className="secondary" onClick={() => { void onReloadLatest().catch(error => setError(error.message)); }}>重新讀取並採用最新任務</button>}
+      {onReloadLatest && <button type="button" disabled={saving} className="secondary" onClick={() => { void onReloadLatest().catch(error => setError(apiErrorMessage(error))); }}>重新讀取並採用最新任務</button>}
       <footer className="task-panel-actions">{task.id && <button type="button" className="delete-button" disabled={saving || readOnly} onClick={() => { if (asyncMode) void runAsync(onDelete); else onDelete(); }}>刪除任務</button>}<button type="button" className="secondary" disabled={saving} onClick={onClose}>取消</button><button type="submit" className="primary" disabled={saving || readOnly}>{saving ? "儲存中…" : "儲存任務"}</button></footer>
     </form>
   </dialog>;

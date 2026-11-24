@@ -91,7 +91,7 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
     authorizeCreate: () => authorizeWrite(workspaceId, "CREATE", "workspaces"),
     authorizeMutation: (id, action, key) => authorizeWrite(id, action, "workspaces", key) });
   return {
-    post: tasks.collectionPost, patch: tasks.itemPatch, delete: tasks.itemDelete,
+    post: tasks.collectionPost, patch: tasks.itemPatch, delete: tasks.itemDelete, taskOrder: tasks.orderPatch,
     boardPost: boards.collectionPost, boardPatch: boards.itemPatch, boardDelete: boards.itemDelete, boardOrder: boards.orderPatch,
     widgetPost: widgets.collectionPost, widgetPatch: widgets.itemPatch, widgetDelete: widgets.itemDelete, widgetOrder: widgets.orderPatch,
     workspacePost: workspaces.collectionPost, workspacePatch: workspaces.itemPatch, workspaceDelete: workspaces.itemDelete,

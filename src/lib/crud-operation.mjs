@@ -34,8 +34,7 @@ export function assertSameOperation(receipt, operation) {
 
 export function createMutationOperation(resource, action, targetId, input, key) {
   assertOperationKey(key);
-  requireValue(resource === "tasks" && ["UPDATE", "DELETE"].includes(action) ||
-    ["boards", "widgets"].includes(resource) && ["UPDATE", "DELETE", "ORDER"].includes(action) ||
+  requireValue(["tasks", "boards", "widgets"].includes(resource) && ["UPDATE", "DELETE", "ORDER"].includes(action) ||
     resource === "workspaces" && ["UPDATE", "DELETE"].includes(action), "Unsupported mutation");
   // Keep the existing Task fingerprint for previously stored receipts.
   const fingerprint = createHash("sha256").update(canonical({ protocol: 1, action, targetId, input,
@@ -48,7 +47,7 @@ export function createReceipt(operation, target, now, result = operation.action 
   const receipt = { ...operation, entityType: "CRUD_OPERATION", schemaVersion: 1, state: "CONFIRMED", createdAt: now,
     workspaceId: target.entityType === "WORKSPACE" ? target.id : target.workspaceId,
     ...(target.workspaceGrantId ? { workspaceGrantId: target.workspaceGrantId } : {}),
-    ...(target.boardId ? { boardId: target.boardId } : operation.resource === "widgets" && operation.action === "ORDER" ? { boardId: target.id } : {}), result };
+    ...(target.boardId ? { boardId: target.boardId } : ["tasks", "widgets"].includes(operation.resource) && operation.action === "ORDER" ? { boardId: target.id } : {}), result };
   assertItemSize(receipt);
   return receipt;
 }
