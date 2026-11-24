@@ -2,7 +2,7 @@
 
 使用 Next.js 與 React 製作的 Kanban 風格 Todo List。支援多看板、任務詳情側邊面板、週曆與月曆，並可透過自訂小組件整理任務進度、專注計時與筆記。
 
-目前採用純前端互動，任務透過瀏覽器的 `localStorage` 儲存，無須設定 API、資料庫或環境變數。
+首頁預設使用瀏覽器的 `localStorage`，可直接使用看板、任務與小組件。專案也提供以 DynamoDB Local 為後端的本機 API。API 模式須明確啟用，正式 API 寫入目前關閉。
 
 ## 功能
 
@@ -90,6 +90,19 @@ npm.cmd run dev
 
 以下的 npm、npx 指令也可分別改成 `npm.cmd`、`npx.cmd`。
 
+### 選用 DynamoDB Local
+
+預設看板可直接用 `npm run dev` 啟動。開發或驗證本機 API 時，請先啟動 Docker，再於 `mytodolist` 目錄執行：
+
+```powershell
+docker compose up -d dynamodb-local
+docker compose ps dynamodb-local
+```
+
+Compose 將 DynamoDB Local 繫結在 `http://127.0.0.1:9000`，資料保存在專案的 `./data/`。如果埠 9000 已有 DynamoDB Local 運作，請先確認要使用哪個執行個體，避免同時啟動兩個。
+
+若要啟動本機 API 開發伺服器，請確認埠 3000 可用，再執行 `npm run dev:api`。API 與工作區的使用範圍請參考 [本機 API 文件](docs/phase3-api.md) 和 [Phase 5-E 交付手冊](docs/phase5e-delivery.md)。使用 `docker compose stop dynamodb-local` 可停止服務並保留 `./data/`。
+
 ## 從零建立 Next.js 專案
 
 這段流程用於建立新的專案骨架。請在尚未存在 `mytodolist` 資料夾的位置執行。
@@ -152,6 +165,7 @@ mytodolist/
 │     ├─ widgets.js             # 小組件種類、內容與預設配置
 │     └─ favicon.ico
 ├─ public/               # 靜態資源
+├─ docker-compose.yml   # 選用的 DynamoDB Local 服務
 ├─ AGENTS.md             # AI 開發工具使用的專案規範
 ├─ next.config.mjs       # Next.js 與 Tailwind Turbopack 設定
 ├─ eslint.config.mjs     # ESLint 設定
@@ -164,11 +178,11 @@ mytodolist/
 ### 資料保存
 
 - 看板、任務與小組件儲存在目前瀏覽器、目前網站來源的 `localStorage`，使用的 key 為 `slowly-workspace-v2`。
-- 首次讀取新版格式時，若存在舊版 `slowly-board-v1` 任務資料，會將任務移入第一個看板。
+- 如果只找到舊版 `slowly-board-v1`，系統會保留原始資料並提示使用備份檢查流程。
 - 清除網站資料、更換瀏覽器或使用其他裝置，會影響能讀取的任務紀錄。不同網域或連接埠也會使用各自的儲存空間。
 - 無痕模式中的紀錄可能在關閉視窗後移除。
 - 目前以單一分頁操作為主，多個分頁同時編輯時，後寫入的內容可能覆蓋先前紀錄。
-- 本機紀錄沒有備份、匯出與跨裝置同步功能。Git 提交與 GitHub 推送保存的是程式碼，瀏覽器中的任務需另外保存。
+- 開發模式可從「資料來源」匯出完整本機備份。Git 保存程式碼，瀏覽器資料與 DynamoDB Local 的 `./data/` 需另外保存。
 - 若瀏覽器阻擋儲存或空間不足，畫面會顯示通知。此時的變更僅保留在目前開啟的頁面。
 
 ### 任務操作
@@ -177,7 +191,7 @@ mytodolist/
 - 子任務可透過「加入」或 Enter 新增。完成全部子任務後，主任務狀態仍由使用者調整。
 - 日期、時間、逾期與每日統計使用瀏覽器所在時區。右上角時間與逾期標示會隨時間更新。
 - 行事曆依截止時間定位任務，每張卡片表示一個截止點。任務目前可記錄截止日期與時間，到期時會顯示逾期狀態。
-- 卡片移動會更新狀態與泳道，目前沒有同欄卡片排序功能。
+- 卡片移動會更新狀態與泳道。受授權的隔離 API 寫入模式支援同欄卡片排序。
 - 觸控裝置上的拖曳支援依瀏覽器而異，可使用狀態選單移動任務，並透過編輯視窗切換泳道。
 
 ### 統計計算
