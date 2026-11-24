@@ -1,7 +1,7 @@
 import "server-only";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { DataError, INDEX_NAME, assertId, assertItemSize, fromFrontend, makeItem, requireValue, validateData } from "./data-model.mjs";
-import { assertOperationKey, createOperation, assertSameOperation, createReceipt, workspaceCreateScope } from "./crud-operation.mjs";
+import { assertOperationKey, createOperation, assertSameOperation, createReceipt, createTaskMutationOperation, workspaceCreateScope } from "./crud-operation.mjs";
 
 // No SDK client is constructed here: tests inject an isolated document-client double.
 export function createRepository(db, { tableName = "SlowlyTasks", clock = () => new Date().toISOString() } = {}) {
@@ -106,6 +106,21 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     "Operation scope does not match", "OPERATION_CONFLICT");
     return receipt;
   }
+  async function mutateTaskOnce(action, id, input, key, mutate) {
+    const operation = createTaskMutationOperation(action, id, input, key);
+    const replay = receipt => {
+      assertSameOperation(receipt, operation);
+      return { item: receipt.result, replayed: receipt.attemptId !== operation.attemptId };
+    };
+    const previous = await readReceipt(key);
+    if (previous) return replay(previous);
+    try { return { item: await mutate(operation), replayed: false }; }
+    catch (cause) {
+      const confirmed = await readReceipt(key);
+      if (confirmed) return replay(confirmed);
+      throw cause;
+    }
+  }
   async function list(type, parent) {
     await get(type === "BOARD" ? "WORKSPACE" : "BOARD", parent);
     const items = []; let cursor;
@@ -152,6 +167,12 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     if (previous) { expected(previous, version); requireValue(previous.boardId === boardId && previous.workspaceId === board.workspaceId, "Entity belongs to a different board", "OWNERSHIP"); }
     const deleting = data === null;
     requireValue(!deleting || previous, "Delete requires an existing entity");
+    if (authority && previous) {
+      requireValue(board.migrationLock !== true && previous.migrationLock !== true, "Migration lock is held", "MIGRATION_LOCKED");
+      requireValue(Number.isSafeInteger(board.taskCount) && board.taskCount > 0 && Number.isSafeInteger(board.doingCount) &&
+        board.doingCount >= Number(previous.data.status === "doing") && board.doingCount <= board.taskCount,
+      "Board task counters are inconsistent", "CONFLICT");
+    }
     let item;
     if (!deleting) {
       const validated = validateData(type, data);
@@ -167,8 +188,11 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     requireValue(doingCount <= board.data.wipLimit && doingCount >= 0, "WIP limit exceeded", "WIP_LIMIT");
     const nextBoard = revised(board, { [countKey]: board[countKey] + (previous ? deleting ? -1 : 0 : 1), doingCount, ...(type === "WIDGET" ? { widgetPresence: "present" } : {}) });
     const actions = [deleting ? remove(previous) : put(item, previous), put(nextBoard, board)];
-    if (operation) await commitCreate(item, actions, operation, authority);
-    else await commit(actions);
+    if (operation?.action === "CREATE") await commitCreate(item, actions, operation, authority);
+    else {
+      if (operation) actions.push(put(createReceipt(operation, item ?? previous, clock())));
+      await commit(actions, authority);
+    }
     return item ?? null;
   }
   async function reorder(type, parentId, entries) {
@@ -185,14 +209,14 @@ export function createRepository(db, { tableName = "SlowlyTasks", clock = () => 
     return items.map(({ item }) => item);
   }
   return {
-    createOnce, getOperation,
+    createOnce, getOperation, mutateTaskOnce,
     createWorkspace, getWorkspace: id => get("WORKSPACE", id), saveWorkspace,
     createBoard, getBoard: id => get("BOARD", id), updateBoard, deleteBoard,
     listBoards: id => list("BOARD", id), listTasks: id => list("TASK", id), listWidgets: id => list("WIDGET", id),
     getTask: id => get("TASK", id), getWidget: id => get("WIDGET", id),
     createTask: (boardId, data, position, { preserveCompletionTime = false } = {}) => childChange("TASK", boardId, null, data, null, position, preserveCompletionTime),
-    updateTask: (boardId, id, data, version) => childChange("TASK", boardId, id, data, version),
-    deleteTask: (boardId, id, version) => childChange("TASK", boardId, id, null, version),
+    updateTask: (boardId, id, data, version, authority, operation) => childChange("TASK", boardId, id, data, version, undefined, false, operation, authority),
+    deleteTask: (boardId, id, version, authority, operation) => childChange("TASK", boardId, id, null, version, undefined, false, operation, authority),
     async setTaskStatus(boardId, id, status, urgent, version) {
       const task = await get("TASK", id);
       return childChange("TASK", boardId, id, { ...task.data, status, urgent }, version);

@@ -24,7 +24,9 @@ export function createOperationApi({ getRepository, configuration = () => proces
       const receipt = await (await getRepository()).getOperation(operationId, scope);
       if (!receipt) return Response.json({ error: { code: "OPERATION_NOT_FOUND", state: "NOT_FOUND", message: "No confirmed receipt is visible. The create outcome remains unknown." } }, { status: 404, headers });
       return Response.json({ data: { operationId, state: "CONFIRMED", resource: receipt.resource, workspaceId: receipt.workspaceId,
-        ...(receipt.boardId ? { boardId: receipt.boardId } : {}), targetId: receipt.targetId, createdAt: receipt.createdAt, result: dto(receipt.result) } }, { headers });
+        ...(receipt.boardId ? { boardId: receipt.boardId } : {}), targetId: receipt.targetId, createdAt: receipt.createdAt,
+        ...(receipt.action === "CREATE" ? {} : { action: receipt.action }),
+        result: receipt.action === "DELETE" ? null : dto(receipt.result) } }, { headers });
     } catch (error) {
       const statuses = { VALIDATION: 400, FORBIDDEN: 403, OWNERSHIP: 403, OPERATION_CONFLICT: 409 };
       const code = error instanceof DataError && statuses[error.code] ? error.code : "OPERATION_UNKNOWN";

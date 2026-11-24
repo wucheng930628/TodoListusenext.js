@@ -12,12 +12,14 @@ export function localRoutes(resource) {
     return (await import("../slowly.mjs")).slowly;
   } });
   if (resource !== "tasks") return handlers;
-  return { ...handlers, async collectionPost(request) {
-    if (process.env.SLOWLY_PHASE5_B1_TABLE) return isolatedTaskRoute("post", request);
-    if (process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_CONTROLLED_UI_RUN_ID) return handlers.collectionPost(request);
-    return Response.json({ error: { code: "FORBIDDEN", message: "Task Create requires an isolated authorization scope." } },
+  const isolatedWrite = (action, controlledHandler) => async (request, context) => {
+    if (process.env.SLOWLY_PHASE5_B1_TABLE) return isolatedTaskRoute(action, request, context);
+    if (process.env.SLOWLY_CONTROLLED_UI_TABLE || process.env.SLOWLY_CONTROLLED_UI_RUN_ID) return controlledHandler(request, context);
+    return Response.json({ error: { code: "FORBIDDEN", message: "Task write requires an isolated authorization scope." } },
       { status: 403, headers: { "Cache-Control": "no-store" } });
-  } };
+  };
+  return { ...handlers, collectionPost: isolatedWrite("post", handlers.collectionPost),
+    itemPatch: isolatedWrite("patch", handlers.itemPatch), itemDelete: isolatedWrite("delete", handlers.itemDelete) };
 }
 
 export async function isolatedTaskRoute(action, request, context) {

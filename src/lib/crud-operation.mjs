@@ -28,14 +28,22 @@ export function createOperation(resource, input, key) {
 
 export function assertSameOperation(receipt, operation) {
   requireValue(receipt.entityType === "CRUD_OPERATION" && receipt.schemaVersion === 1 && receipt.state === "CONFIRMED" &&
-    receipt.resource === operation.resource && receipt.parentScope === operation.parentScope && receipt.fingerprint === operation.fingerprint,
+    receipt.action === operation.action && receipt.resource === operation.resource && receipt.parentScope === operation.parentScope && receipt.fingerprint === operation.fingerprint,
   "Operation key already belongs to another request", "OPERATION_CONFLICT");
+}
+
+export function createTaskMutationOperation(action, targetId, input, key) {
+  assertOperationKey(key);
+  requireValue(["UPDATE", "DELETE"].includes(action), "Unsupported Task mutation");
+  const fingerprint = createHash("sha256").update(canonical({ protocol: 1, action, targetId, input })).digest("hex");
+  return { id: `SLOWLY#CRUD_OPERATION#${key}`, operationId: key, attemptId: randomUUID(), action,
+    resource: "tasks", type: "TASK", parentScope: input.boardId, fingerprint, targetId };
 }
 
 export function createReceipt(operation, target, now) {
   const receipt = { ...operation, entityType: "CRUD_OPERATION", schemaVersion: 1, state: "CONFIRMED", createdAt: now,
     workspaceId: target.entityType === "WORKSPACE" ? target.id : target.workspaceId,
-    ...(target.boardId ? { boardId: target.boardId } : {}), result: target };
+    ...(target.boardId ? { boardId: target.boardId } : {}), result: operation.action === "DELETE" ? null : target };
   assertItemSize(receipt);
   return receipt;
 }

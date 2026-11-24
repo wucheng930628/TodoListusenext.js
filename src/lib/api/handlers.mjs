@@ -106,7 +106,7 @@ export function dto(item) {
     ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}), ...(item.boardId ? { boardId: item.boardId } : {}), data: item.data };
 }
 
-export function createApi(resource, { getRepository, configuration = () => process.env, authorizeTaskCreate } = {}) {
+export function createApi(resource, { getRepository, configuration = () => process.env, authorizeTaskCreate, authorizeTaskMutation } = {}) {
   const definition = definitions[resource]; requireValue(definition, "Unknown resource");
   const { type, singular } = definition;
   const wrap = action => async (request, context = {}) => {
@@ -140,6 +140,23 @@ export function createApi(resource, { getRepository, configuration = () => proce
     }
   }
   const scopeKeys = resource === "workspaces" ? [] : resource === "boards" ? ["workspaceId"] : ["boardId", "workspaceId"];
+  async function taskMutation(action, request, id, input, mutate) {
+    let authority;
+    let key;
+    if (authorizeTaskMutation) {
+      assertId(input.workspaceId, "WORKSPACE");
+      key = request.headers.get("idempotency-key");
+      if (key !== null) assertOperationKey(key);
+      authority = await authorizeTaskMutation(input.workspaceId, action);
+      requireValue(authority, "Task mutation is not authorized", "FORBIDDEN");
+    }
+    const repo = await getRepository();
+    const execute = operation => mutate(repo, authority, operation);
+    const result = key ? await repo.mutateTaskOnce(action, id, input, key, execute) : { item: await execute() };
+    const resultHeaders = key ? { ...headers, "Operation-Id": key, "Idempotency-Status": result.replayed ? "replayed" : "committed" } : headers;
+    return action === "DELETE" ? new Response(null, { status: 204, headers: resultHeaders })
+      : Response.json({ data: dto(result.item) }, { headers: resultHeaders });
+  }
   return {
     collectionGet: wrap(async request => {
       const q = query(request, resource === "workspaces" ? ["id"] : scopeKeys);
@@ -195,23 +212,26 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
       if (["tasks", "widgets"].includes(resource)) assertId(input.boardId, "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
-      const repo = await getRepository(); const previous = await repo[`get${singular}`](id);
-      await assertScope(repo, previous, input, true);
-      const data = { ...previous.data, ...input.data };
-      if (resource === "tasks" && input.data.subtasks !== undefined) {
-        data.subtasks = input.data.subtasks.map(item => ({ ...previous.data.subtasks.find(old => old.id === item.id), ...item }));
-      }
-      if (resource === "widgets" && input.data.config !== undefined) {
-        // Preserve imported extension fields while keeping existing known-config replacement semantics.
-        const known = new Set(["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
-        data.config = { ...Object.fromEntries(Object.entries(previous.data.config || {}).filter(([key]) => !known.has(key))), ...input.data.config };
-      }
-      if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
-      let item;
-      if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
-      else if (resource === "boards") item = await repo.updateBoard(id, data, input.version);
-      else item = await repo[`update${singular}`](input.boardId, id, data, input.version);
-      return response(dto(item));
+      return taskMutation("UPDATE", request, id, input, async (repo, authority, operation) => {
+        const previous = await repo[`get${singular}`](id);
+        await assertScope(repo, previous, input, true);
+        const data = { ...previous.data, ...input.data };
+        if (resource === "tasks" && input.data.subtasks !== undefined) {
+          data.subtasks = input.data.subtasks.map(item => ({ ...previous.data.subtasks.find(old => old.id === item.id), ...item }));
+        }
+        if (resource === "widgets" && input.data.config !== undefined) {
+          // Preserve imported extension fields while keeping existing known-config replacement semantics.
+          const known = new Set(["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"]);
+          data.config = { ...Object.fromEntries(Object.entries(previous.data.config || {}).filter(([key]) => !known.has(key))), ...input.data.config };
+        }
+        if (resource !== "workspaces") requireValue(data.id === previous.data.id, "Frontend id cannot change");
+        let item;
+        if (resource === "workspaces") item = await repo.saveWorkspace(id, data, input.version);
+        else if (resource === "boards") item = await repo.updateBoard(id, data, input.version);
+        else if (resource === "tasks") item = await repo.updateTask(input.boardId, id, data, input.version, authority, operation);
+        else item = await repo.updateWidget(input.boardId, id, data, input.version);
+        return item;
+      });
     }),
     itemDelete: wrap(async (request, context) => {
       requireValue(resource !== "workspaces", "Workspace deletion is unsupported", "NOT_SUPPORTED");
@@ -220,11 +240,14 @@ export function createApi(resource, { getRepository, configuration = () => proce
       if (resource === "boards") assertId(input.workspaceId, "WORKSPACE");
       else assertId(input.boardId, "BOARD");
       if (input.workspaceId !== undefined) assertId(input.workspaceId, "WORKSPACE");
-      const repo = await getRepository(); const item = await repo[`get${singular}`](id);
-      await assertScope(repo, item, input, true);
-      if (resource === "boards") await repo.deleteBoard(id, input.version);
-      else await repo[`delete${singular}`](input.boardId, id, input.version);
-      return new Response(null, { status: 204, headers });
+      return taskMutation("DELETE", request, id, input, async (repo, authority, operation) => {
+        const item = await repo[`get${singular}`](id);
+        await assertScope(repo, item, input, true);
+        if (resource === "boards") await repo.deleteBoard(id, input.version);
+        else if (resource === "tasks") await repo.deleteTask(input.boardId, id, input.version, authority, operation);
+        else await repo.deleteWidget(input.boardId, id, input.version);
+        return null;
+      });
     }),
     orderPatch: wrap(async request => {
       requireValue(resource !== "workspaces", "Unsupported ordering", "NOT_SUPPORTED");

@@ -15,14 +15,14 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
   const migrationId = env.SLOWLY_PHASE5_B1_PLAN;
   const sourceNamespace = env.SLOWLY_PHASE5_B1_SOURCE_NAMESPACE;
   const restricted = { send(command) {
-    const tables = command.input.TransactItems?.map(action => (action.Put || action.ConditionCheck)?.TableName) ?? [command.input.TableName];
+    const tables = command.input.TransactItems?.map(action => (action.Put || action.Delete || action.ConditionCheck)?.TableName) ?? [command.input.TableName];
     requireValue(["GetCommand", "QueryCommand", "TransactWriteCommand"].includes(command.constructor.name) &&
       tables.length > 0 && tables.every(name => name === tableName), "Outside isolated Task Create storage", "FORBIDDEN");
     return db.send(command);
   } };
   const store = migrationStore(restricted, tableName);
   const getRepository = () => createRepository(restricted, { tableName });
-  async function authorizeTaskCreate(requestedWorkspace) {
+  async function authorizeTaskWrite(requestedWorkspace, action = "CREATE") {
     requireValue(env.NODE_ENV === "development" && env.SLOWLY_LOCAL_API === "1" &&
       env.SLOWLY_FORMAL_VIEW_ENABLED !== "1" && !env.SLOWLY_CONTROLLED_UI_TABLE && !env.SLOWLY_CONTROLLED_UI_RUN_ID &&
       !env.SLOWLY_MAIN_UI_TEST && env.DYNAMODB_ENDPOINT === "http://127.0.0.1:9000" &&
@@ -35,7 +35,9 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
       requireValue(grant?.entityType === "TASK_CREATE_GRANT" && grant.state === "ACTIVE" &&
         grant.workspaceId === workspaceId && grant.migrationId === migrationId && grant.planId === migrationId &&
         grant.sourceNamespace === sourceNamespace && Number.isSafeInteger(grant.version) &&
-        Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > now(), "Task Create grant is unavailable", "FORBIDDEN");
+        Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > now() &&
+        (action === "CREATE" || Array.isArray(grant.taskMutations) && grant.taskMutations.includes(action)),
+      "Task write grant is unavailable", "FORBIDDEN");
     }
     requireActiveGrant();
     const workspace = await store.get(workspaceId);
@@ -56,13 +58,14 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
       return [store.check(grant), store.check({ id, entityType, version, state, lockState, releaseVerificationHash })];
     } };
   }
+  const tasks = createApi("tasks", { configuration, getRepository, authorizeTaskCreate: authorizeTaskWrite, authorizeTaskMutation: authorizeTaskWrite });
   return {
-    post: createApi("tasks", { configuration, getRepository, authorizeTaskCreate }).collectionPost,
+    post: tasks.collectionPost, patch: tasks.itemPatch, delete: tasks.itemDelete,
     view: createWorkspaceViewApi({ configuration, getRepository, isolation: () => true,
-      authorizeRead: authorizeTaskCreate, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
+      authorizeRead: authorizeTaskWrite, getMigrationService: () => createMigrationService(restricted, { tableName }) }),
     receipt: createOperationApi({ configuration, getRepository, async authorizeScope(scope) {
       requireValue(scope.resource === "tasks", "Only Task receipts are authorized", "FORBIDDEN");
-      await authorizeTaskCreate(scope.workspaceId);
+      await authorizeTaskWrite(scope.workspaceId);
     } }),
   };
 }
