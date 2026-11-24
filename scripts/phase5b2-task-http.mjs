@@ -568,6 +568,144 @@ try {
       console.log(JSON.stringify({ action: "Board DELETE", request: fields, status: 204 }));
     });
   }
+  if (process.argv.includes("--widgets")) {
+    const sendWidget = (method, suffix, fields, key = randomUUID(), useProxy = false) => fetch(
+      `${useProxy ? `http://127.0.0.1:${proxyPort}` : origin}/api/widgets${suffix}`, {
+        method, signal: AbortSignal.timeout(useProxy ? 1500 : 15000), headers: { origin, "content-type": "application/json", "idempotency-key": key },
+        body: JSON.stringify(fields),
+      },
+    );
+    const widgetReceipt = key => fetch(`${origin}/api/operations/${key}?${new URLSearchParams({ resource: "widgets", workspaceId, boardId })}`);
+    const byId = id => `/${encodeURIComponent(id)}`;
+    const scope = { workspaceId, boardId };
+    const input = { ...scope, position: 1, data: { id: "widget-c3", type: "note", span: 6, height: 200, config: { text: "original" } } };
+    const currentGrant = await get(grant.id);
+    const widgetGrant = { ...currentGrant, version: currentGrant.version + 1, widgetMutations: ["CREATE", "UPDATE", "DELETE", "ORDER"] };
+    let widget;
+    await check("C3 Widget Create validates scope, type/config, dimensions and idempotency", async () => {
+      await expect(sendWidget("POST", "", input), 403, "FORBIDDEN");
+      await put({ ...widgetGrant, expiresAt: 1 });
+      await expect(sendWidget("POST", "", input), 403, "FORBIDDEN");
+      await put(widgetGrant);
+      for (const fields of [{ type: "invalid" }, { config: { minutes: 25 } }, { config: { text: 1 } }, { span: 3 }, { height: 601 }]) {
+        await expect(sendWidget("POST", "", { ...input, data: { ...input.data, ...fields } }), 400, "VALIDATION");
+      }
+      await expect(sendWidget("POST", "", { ...input, position: -1 }), 400, "VALIDATION");
+      await expect(sendWidget("POST", "", { ...input, workspaceId: `SLOWLY#WORKSPACE#${randomUUID()}` }), 403, "FORBIDDEN");
+      const foreign = makeItem("BOARD", board.data, { parent: `SLOWLY#WORKSPACE#${randomUUID()}` });
+      await put(foreign);
+      await expect(sendWidget("POST", "", { ...input, boardId: foreign.id }), 403, "OWNERSHIP");
+      await expect(sendWidget("POST", "", { ...input, boardId: `SLOWLY#BOARD#${randomUUID()}` }), 404, "NOT_FOUND");
+      const before = await get(boardId);
+      const root = await get(workspaceId);
+      const createKey = randomUUID();
+      await put({ ...makeItem("WIDGET", input.data, { parent: foreign.id, workspaceId: foreign.workspaceId }),
+        id: `SLOWLY#WIDGET#${createKey}` });
+      await expect(sendWidget("POST", "", input, createKey), 409, "CONFLICT");
+      assert.deepEqual(await get(boardId), before);
+      assert.equal(await get(receiptId(createKey)), undefined);
+      const key = randomUUID();
+      const response = await expect(sendWidget("POST", "", input, key), 201);
+      widget = response.body.data;
+      assert.deepEqual(widget.data, input.data);
+      assert.equal(widget.position, input.position);
+      assert.deepEqual((await expect(sendWidget("POST", "", input, key), 200)).body.data, widget);
+      await expect(sendWidget("POST", "", { ...input, position: 2 }, key), 409, "OPERATION_CONFLICT");
+      assert.deepEqual((await expect(widgetReceipt(key), 200)).body.data.result, widget);
+      assert.equal((await get(boardId)).version, before.version + 1);
+      assert.equal((await get(boardId)).widgetCount, before.widgetCount + 1);
+      assert.deepEqual(await get(workspaceId), root);
+      console.log(JSON.stringify({ action: "Widget POST", request: input, status: 201, version: widget.version }));
+    });
+    await check("C3 Widget PATCH preserves extensions and enforces version, ownership and lock", async () => {
+      const previous = await get(widget.id);
+      await put({ ...previous, data: { ...previous.data, config: { ...previous.data.config, importedSetting: "retain" } } });
+      const fields = { ...scope, version: widget.version, data: { span: 8, height: 240, manualSize: true, config: { text: "updated" } } };
+      await expect(sendWidget("PATCH", byId(`SLOWLY#WIDGET#${randomUUID()}`), fields), 404, "NOT_FOUND");
+      await expect(sendWidget("PATCH", byId(widget.id), { ...fields, boardId: `SLOWLY#BOARD#${randomUUID()}` }), 403, "OWNERSHIP");
+      await expect(sendWidget("PATCH", byId(widget.id), { ...fields, data: { type: "timer" } }), 400, "VALIDATION");
+      await expect(sendWidget("PATCH", byId(widget.id), { ...fields, data: { type: "timer", config: { minutes: 26 } } }), 400, "VALIDATION");
+      await expect(sendWidget("PATCH", byId(widget.id), { ...fields, data: { position: 0 } }), 400, "VALIDATION");
+      const saved = await get(widget.id);
+      await put({ ...saved, migrationLock: true });
+      await expect(sendWidget("PATCH", byId(widget.id), fields), 409, "MIGRATION_LOCKED");
+      await put(saved);
+      const key = randomUUID();
+      const response = await expect(sendWidget("PATCH", byId(widget.id), fields, key), 200);
+      assert.equal(response.body.data.version, widget.version + 1);
+      assert.deepEqual(response.body.data.data.config, { text: "updated", importedSetting: "retain" });
+      assert.equal(response.body.data.data.height, 240);
+      await expect(sendWidget("PATCH", byId(widget.id), fields), 409, "CONFLICT");
+      assert.deepEqual((await expect(widgetReceipt(key), 200)).body.data.result, response.body.data);
+      widget = response.body.data;
+      console.log(JSON.stringify({ action: "Widget PATCH", request: fields, status: 200, version: widget.version }));
+    });
+    await check("C3 complete Widget order is atomic and reloads in Workspace View", async () => {
+      const next = { ...input, position: 2, data: { id: "c3-timer", type: "timer", span: 4, height: 180,
+        config: { minutes: 25, taskId: "http-task", endsAt: null, remaining: 60 } } };
+      const timer = (await expect(sendWidget("POST", "", next), 201)).body.data;
+      const start = (await expect(view(), 200)).body.data;
+      const originBoard = start.boards.find(row => row.board.id === boardId);
+      const entries = [timer, ...originBoard.widgets.filter(item => item.id !== timer.id)].map(({ id, version }, position) => ({ id, version, position }));
+      const order = { ...scope, entries };
+      await expect(sendWidget("PATCH", "/order", { ...order, entries: entries.slice(1) }), 409, "CONFLICT");
+      await expect(sendWidget("PATCH", "/order", { ...order, entries: [entries[0], entries[0]] }), 400, "VALIDATION");
+      await expect(sendWidget("PATCH", "/order", { ...order, entries: [entries[0], ...entries.slice(1).map(item => ({ ...item, position: 0 }))] }), 400, "VALIDATION");
+      const oversized = Array.from({ length: 96 }, (_, position) => ({ id: `SLOWLY#WIDGET#${randomUUID()}`, version: 1, position }));
+      await expect(sendWidget("PATCH", "/order", { ...order, entries: oversized }), 400, "VALIDATION");
+      const old = await get(widget.id);
+      const broken = { ...old, version: Number.MAX_SAFE_INTEGER };
+      const parent = await get(boardId);
+      const failedKey = randomUUID();
+      await put(broken);
+      await expect(sendWidget("PATCH", "/order", { ...order, entries: entries.map(item => item.id === widget.id ? { ...item, version: broken.version } : item) }, failedKey), 500, "INTERNAL");
+      assert.deepEqual(await get(boardId), parent);
+      assert.equal((await get(timer.id)).version, timer.version);
+      assert.equal(await get(receiptId(failedKey)), undefined);
+      await put(old);
+      const key = randomUUID();
+      const ordered = (await expect(sendWidget("PATCH", "/order", order, key), 200)).body.data;
+      assert.deepEqual((await expect(sendWidget("PATCH", "/order", order, key), 200)).body.data, ordered);
+      assert.deepEqual((await expect(widgetReceipt(key), 200)).body.data.result, ordered);
+      assert.deepEqual(ordered.map(item => [item.id, item.position, item.version]), entries.map(item => [item.id, item.position, item.version + 1]));
+      const reread = (await expect(view(), 200)).body.data;
+      const boardView = reread.boards.find(row => row.board.id === boardId);
+      assert.deepEqual(boardView.widgets, ordered);
+      assert.deepEqual(boardView.tasks, originBoard.tasks);
+      assert.equal(boardView.board.version, originBoard.board.version + 1);
+      assert.equal(reread.workspace.version, start.workspace.version);
+      widget = ordered.find(item => item.id === widget.id);
+      console.log(JSON.stringify({ action: "Widget ORDER", request: order, status: 200 }));
+    });
+    await check("C3 Widget DELETE timeout recovers a receipt without changing other entities", async () => {
+      const parent = await get(boardId);
+      const before = (await expect(view(), 200)).body.data;
+      const fields = { ...scope, version: widget.version };
+      await expect(sendWidget("DELETE", byId(widget.id), { ...fields, version: widget.version - 1 }), 409, "CONFLICT");
+      const key = randomUUID();
+      afterCommit = Promise.withResolvers();
+      await assert.rejects(sendWidget("DELETE", byId(widget.id), fields, key, true), { name: "TimeoutError" });
+      assert.equal((await afterCommit.promise).status, 204);
+      const durable = (await expect(widgetReceipt(key), 200)).body.data;
+      assert.equal(durable.action, "DELETE");
+      assert.equal(durable.targetId, widget.id);
+      assert.equal(durable.state, "CONFIRMED");
+      assert.equal(durable.result, null);
+      const replay = await sendWidget("DELETE", byId(widget.id), fields, key);
+      assert.equal(replay.status, 204);
+      assert.equal(replay.headers.get("idempotency-status"), "replayed");
+      assert.equal(await get(widget.id), undefined);
+      assert.equal((await get(boardId)).widgetCount, parent.widgetCount - 1);
+      assert.equal((await get(boardId)).version, parent.version + 1);
+      const snapshot = (await expect(view(), 200)).body.data;
+      assert.deepEqual(snapshot.workspace, before.workspace);
+      const oldBoard = before.boards.find(row => row.board.id === boardId);
+      const newBoard = snapshot.boards.find(row => row.board.id === boardId);
+      assert.deepEqual(newBoard.tasks, oldBoard.tasks);
+      assert.deepEqual(newBoard.widgets, oldBoard.widgets.filter(item => item.id !== widget.id));
+      console.log(JSON.stringify({ action: "Widget DELETE", request: fields, status: 204 }));
+    });
+  }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
