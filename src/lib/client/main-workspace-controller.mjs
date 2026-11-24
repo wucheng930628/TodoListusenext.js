@@ -4,7 +4,7 @@ import { createSafeCreateIntent } from "./safe-create.mjs";
 import { createRecoveryJournal, validateRecovery } from "./recovery-journal.mjs";
 
 const error = (code, message) => new SlowlyApiError(message, { code, outcome: "not-sent" });
-export function createMainWorkspaceController({ api = createSlowlyApi(), readView = api.getWorkspaceView, development = process.env.NODE_ENV === "development", readOnly = false, journal = createRecoveryJournal() } = {}) {
+export function createMainWorkspaceController({ api = createSlowlyApi(), readView = api.getWorkspaceView, development = process.env.NODE_ENV === "development", readOnly = false, isolatedWriteFixture = false, journal = createRecoveryJournal() } = {}) {
   let state = { mode: "localStorage", status: "idle", workspaceId: null, activeBoardId: null, projection: null, allowWrites: false, mutation: "idle", error: null, uncertainWrite: false, operation: null, createRecovery: null, recoveredCreateRevision: 0, scopeRevision: 0 };
   state = { ...state, startupStatus: "idle", recoveryWorkspaceId: null, activating: false };
   const initial = state; const listeners = new Set(); let epoch = 0; let readAbort; let writeAbort; let pending = false; let bootstrapVersion = 0;
@@ -19,13 +19,16 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
   }
   function requireFormalWrites() {
     if (readOnly) throw error("WRITES_DISABLED", "此 API 模式僅供讀取。");
+    if (isolatedWriteFixture && state.projection?.snapshot.readiness?.capabilities?.isolatedMutationReceipts !== true) {
+      throw error("WRITES_DISABLED", "目前 Workspace 未啟用隔離寫入契約。");
+    }
     if (!formalGateOpen()) throw error("CUTOVER_REQUIRED", "正式 Cutover Gate 尚未授權或已過期，保持唯讀。");
     if (state.projection?.snapshot.readiness?.capabilities?.formalRuntimeWritesEnabled === false) {
       throw error("WRITES_DISABLED", "正式 API 尚未授權業務寫入，保持唯讀。");
     }
   }
   function guardSwitch({ recovery = false } = {}) {
-    if (pending || activating) throw error("MUTATION_IN_PROGRESS", "仍有操作進行，請等待結果；取消等待不代表伺服器已取消。");
+    if (pending || activating || state.checkingMutation) throw error("MUTATION_IN_PROGRESS", "仍有操作進行，請等待結果；取消等待不代表伺服器已取消。");
     if (drafts.size) throw error("UNSAVED_DRAFTS", "仍有未儲存草稿，請先儲存或明確保留草稿，不能切換。");
     if (state.uncertainWrite && !recovery) throw error("RECOVERY_REQUIRED", "請先核對未確認操作，不能切換資料來源。");
   }
@@ -112,26 +115,52 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     finally { pending = false; publish({ mutation: "not-confirmed", uncertainWrite: true }); }
     return recoverCreate();
   }
-  async function mutate(action, kind, invoke, merge, intent) {
+  async function recoverMutation() {
+    const record = recoveryRecord;
+    if (!record?.receiptScope || pending || state.checkingMutation || state.mode !== "api" || state.workspaceId !== record.workspaceId) {
+      throw error("RECOVERY_REQUIRED", "請切回原 Workspace，再查詢操作結果。");
+    }
+    publish({ checkingMutation: true, allowWrites: false });
+    try {
+      const result = await api.getOperation(record.token, record.receiptScope);
+      if (result.state === "NOT_FOUND") { publish({ error: error("OPERATION_UNKNOWN", "尚未查到收據，操作結果仍不明。") }); return result; }
+      if (result.state !== "CONFIRMED" || result.operationId !== record.token || result.action !== record.action.toUpperCase() ||
+        result.resource !== record.receiptScope.resource || result.workspaceId !== record.workspaceId || result.boardId !== record.receiptScope.boardId ||
+        result.targetId !== record.receiptTarget || (record.action === "delete" ? result.result !== null : result.result?.id !== record.receiptTarget)) {
+        throw error("INVALID_RECEIPT", "操作收據與原始請求不一致。");
+      }
+      if (!await refresh() || recoveryRecord !== record) return null;
+      await journal.clear(record.token); recoveryRecord = null;
+      publish({ uncertainWrite: false, mutation: "success", error: null });
+      return result;
+    } finally { publish({ checkingMutation: false }); }
+  }
+  async function mutate(action, kind, invoke, merge, intent, ref) {
     requireWritable();
     const projection = state.projection; const workspaceId = state.workspaceId; const boardId = state.activeBoardId; const current = ++epoch;
     readAbort?.abort(); writeAbort = new AbortController(); const signal = writeAbort.signal; pending = true;
     if (intent) createIntent = intent;
     const record = { formatVersion: 1, token: intent?.operationKey || crypto.randomUUID(), workspaceId, boardFrontendId: boardId, action, kind,
-      ...(intent ? { intent: intent.exportIntent() } : {}) };
+      ...(intent ? { intent: intent.exportIntent() } : {}),
+      ...(ref && projection.snapshot.readiness?.capabilities?.isolatedMutationReceipts === true ? {
+        receiptScope: { resource: `${kind}s`, workspaceId, ...(ref.boardId ? { boardId: ref.boardId } : {}) },
+        receiptTarget: ref.databaseId,
+      } : {}) };
     publish({ mutation: "loading", error: null, operation: { action, kind } }); let result; let acknowledged = false; let claimed = false; let dispatched = false;
     try {
       await journal.claim(record); claimed = true; recoveryRecord = record;
       if (current !== epoch || signal.aborted) throw error("ABORTED", "操作等待已取消，請先核對恢復紀錄。");
       requireFormalWrites();
       dispatched = true;
-      result = await invoke({ api, projection, workspaceId, boardId, signal });
+      result = await invoke({ api, projection, workspaceId, boardId, signal, operationKey: record.receiptScope ? record.token : undefined });
       acknowledged = true;
       if (current !== epoch || signal.aborted) return result;
       const snapshot = structuredClone(projection.snapshot); merge(snapshot, result);
       const nextProjection = projectMainView(snapshot, workspaceId);
       await journal.clear(record.token); recoveryRecord = null;
-      publish({ projection: nextProjection, mutation: "success", error: null });
+      const activeBoardId = nextProjection.workspace.boards.some(board => board.id === state.activeBoardId)
+        ? state.activeBoardId : nextProjection.workspace.boards[0]?.id ?? null;
+      publish({ projection: nextProjection, activeBoardId, mutation: "success", error: null });
       if (intent) createIntent = null;
     } catch (cause) {
       if (current === epoch && !signal.aborted) {
@@ -149,6 +178,14 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
           pending = false;
           try { const receipt = await recoverCreate(); if (receipt?.state === "CONFIRMED") return receipt.result; }
           catch { /* UNKNOWN remains visible until an explicit receipt query succeeds. */ }
+        }
+        if (record.receiptScope && uncertain) {
+          pending = false;
+          try { const receipt = await recoverMutation(); if (receipt?.state === "CONFIRMED") return receipt.result; }
+          catch { /* Retain UNKNOWN and the original receipt scope. */ }
+        } else if (record.receiptScope && versionConflict && !uncertain) {
+          pending = false;
+          try { await refresh(); } catch { /* Refresh failure remains visible. */ }
         }
       }
       throw cause;
@@ -183,22 +220,26 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     const position = Math.max(-1, ...rows.map(row => row.position)) + 1;
     const createInput = { workspaceId: state.workspaceId, ...(board ? { boardId: board.databaseId } : {}), data: payload, position };
     const intent = existing ? null : createSafeCreateIntent(api, `${type}s`, createInput);
-    return mutate(existing ? "update" : "create", type, ({ api, workspaceId, signal }) => {
+    return mutate(existing ? "update" : "create", type, ({ api, workspaceId, signal, operationKey }) => {
       const input = { workspaceId, ...(board ? { boardId: board.databaseId } : {}), data: payload, ...(existing ? { version: ref.version } : { position }) };
-      return existing ? api[`update${name}`](ref.databaseId, input, { signal }) : intent.send({ signal });
+      return existing ? api[`update${name}`](ref.databaseId, input, { signal, operationKey }) : intent.send({ signal });
     }, (snapshot, result) => {
       if (type === "board") { const entry = entryFor(snapshot, result.id); if (entry) entry.board = result; else snapshot.boards.push({ board: result, tasks: [], widgets: [], widgetsPresence: "absent" }); }
       else { const entry = entryFor(snapshot, board.databaseId); const key = type === "task" ? "tasks" : "widgets"; entry[key] = [...entry[key].filter(item => item.id !== result.id), result]; if (type === "widget") entry.widgetsPresence = "present"; }
-    }, intent);
+    }, intent, ref);
   }
   async function removeEntity(type, frontendId, { expectedVersion } = {}) {
     requireWritable();
     const { ref } = entity(type, frontendId); const name = type[0].toUpperCase() + type.slice(1);
+    if (type === "board") {
+      const entry = entryFor(state.projection.snapshot, ref.databaseId);
+      if (entry.tasks.length || entry.widgets.length) throw error("NOT_EMPTY", "請先移除看板內的任務及小組件。");
+    }
     if (expectedVersion !== undefined && expectedVersion !== ref.version) throw new SlowlyApiError("刪除草稿版本已過時。", { status: 409, code: "CONFLICT", outcome: "not-sent" });
-    return mutate("delete", type, ({ api, workspaceId, signal }) => api[`delete${name}`](ref.databaseId, { workspaceId, ...(ref.boardId ? { boardId: ref.boardId } : {}), version: ref.version }, { signal }), snapshot => {
+    return mutate("delete", type, ({ api, workspaceId, signal, operationKey }) => api[`delete${name}`](ref.databaseId, { workspaceId, ...(ref.boardId ? { boardId: ref.boardId } : {}), version: ref.version }, { signal, operationKey }), snapshot => {
       if (type === "board") snapshot.boards = snapshot.boards.filter(entry => entry.board.id !== ref.databaseId);
       else { const entry = entryFor(snapshot, ref.boardId); const key = type === "task" ? "tasks" : "widgets"; entry[key] = entry[key].filter(item => item.id !== ref.databaseId); }
-    });
+    }, null, ref);
   }
   async function reorder(type, frontendIds) {
     requireWritable();
@@ -213,7 +254,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     });
   }
   return {
-    getSnapshot: () => state, getServerSnapshot: () => initial, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }, refresh, authorizeWrites, cancel, recoverCreate, resendCreate,
+    getSnapshot: () => state, getServerSnapshot: () => initial, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }, refresh, authorizeWrites, cancel, recoverCreate, resendCreate, recoverMutation,
     async bootstrapRecovery() {
       const generation = ++bootstrapVersion;
       publish({ startupStatus: "checking" });
@@ -236,6 +277,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
     },
     async resolveUncertain(confirmation) {
       if (pending || !recoveryRecord || recoveryRecord.action === "create" || confirmation !== state.workspaceId) throw error("RECOVERY_REQUIRED", "新增必須查詢 Receipt；其他操作需核對伺服器結果後明確確認。");
+      if (recoveryRecord.receiptScope) return recoverMutation();
       await refresh(); await journal.clear(recoveryRecord.token); recoveryRecord = null;
       publish({ uncertainWrite: false, mutation: "idle", allowWrites: false });
     },
@@ -260,6 +302,7 @@ export function createMainWorkspaceController({ api = createSlowlyApi(), readVie
             createRecovery: createIntent ? { operationKey: createIntent.operationKey, state: "UNKNOWN", checking: false } : null, scopeRevision: state.scopeRevision + 1 };
         } });
         if (committed && createIntent) { try { await recoverCreate(); } catch { /* Keep UNKNOWN frozen until an explicit query succeeds. */ } }
+        else if (committed && stored?.receiptScope) { try { await recoverMutation(); } catch { /* Retain the journal for another receipt lookup. */ } }
       } finally { activating = false; publish({ activating: false }); }
     },
     deactivate() { guardSwitch(); cancel(); publish({ ...initial, startupStatus: "ready", scopeRevision: state.scopeRevision + 1 }); },

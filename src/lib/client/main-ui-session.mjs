@@ -15,6 +15,8 @@ export function createMainUiSession(state) {
     reading: state.status === "loading",
     writable: state.status === "success" && state.allowWrites && state.mutation !== "loading" && !state.uncertainWrite,
     selectBoard: action("selectBoard"), saveTask: action("saveTask"), deleteTask: action("deleteTask"), saveWidget: action("saveWidget"),
+    deleteBoard: action("deleteBoard"),
+    widgetTypeWrites: state.projection.snapshot.readiness?.capabilities?.isolatedMutationReceipts === true,
     reorderTasks: action("reorderTasks"), reorderBoards: action("reorderBoards"), refresh: action("refresh"),
     async saveBoard(data, options) { check(); const result = await controller.saveBoard(data, options); check(); return result; },
     taskVersion(id) { check(); return reference(state.projection, "task", id, state.activeBoardId).version; },

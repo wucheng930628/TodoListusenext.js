@@ -7,9 +7,9 @@ import { captureVerifiedBackup, downloadBackupArtifact } from "../lib/client/ver
 import { createRecoveryJournal } from "../lib/client/recovery-journal.mjs";
 
 const defaults = { development: process.env.NODE_ENV === "development" };
-export default function MainUi({ options = defaults, isolationEntry = false }) {
+export default function MainUi({ options = defaults, isolationEntry = false, isolatedWriteFixture = false }) {
   const effectiveOptions = useMemo(() => ({ ...options, readOnly: options.readOnly ?? !isolationEntry,
-    journal: options.journal || createRecoveryJournal({ namespace: isolationEntry ? "isolated" : "formal" }) }), [options, isolationEntry]);
+    isolatedWriteFixture, journal: options.journal || createRecoveryJournal({ namespace: isolationEntry ? "isolated" : "formal" }) }), [options, isolationEntry, isolatedWriteFixture]);
   const state = useMainWorkspace(effectiveOptions); const { controller } = state;
   const [workspaceId, setWorkspaceId] = useState(""); const [apiReady, setApiReady] = useState(false);
   const [confirmation, setConfirmation] = useState(""); const [message, setMessage] = useState("");
@@ -62,10 +62,11 @@ export default function MainUi({ options = defaults, isolationEntry = false }) {
       {(state.activating || state.mode === "api" && state.status === "loading") && <p role="status">讀取 API 資料中…</p>}
       {state.mode === "api" && state.status === "error" && state.projection && <p role="status">目前顯示上次成功讀取的 API 資料。</p>}
       {state.uncertainWrite && <p role="alert">寫入結果尚未確認，已暫停後續寫入。請先核對資料，不要重送新增。</p>}
-      {state.mode === "api" && state.uncertainWrite && !state.createRecovery && <>
+      {state.mode === "api" && state.uncertainWrite && !state.createRecovery && (controller.recoveryDetails()?.receiptScope ?
+        <button type="button" disabled={state.checkingMutation} onClick={() => void attempt(controller.recoverMutation)}>查詢操作結果</button> : <>
         {effectiveOptions.readOnly && <label>確認 Workspace<input value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label>}
         <button type="button" onClick={() => void attempt(async () => { if (window.confirm("已人工核對伺服器的更新／刪除／排序結果？此操作不會重送寫入。")) await controller.resolveUncertain(confirmation); })}>已人工核對未確認結果</button>
-      </>}
+      </>)}
       {state.mode === "api" && state.uncertainWrite && state.createRecovery && <div>
         <details><summary>原始未確認操作內容</summary><pre>{JSON.stringify(controller.recoveryDetails(), null, 2)}</pre></details>
         <p role="status">新增操作 {state.createRecovery.operationKey} · {state.createRecovery.state}{state.createRecovery.receiptState === "NOT_FOUND" ? "（尚未查到 Receipt，結果仍不明）" : ""}</p>

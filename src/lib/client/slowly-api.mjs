@@ -26,8 +26,8 @@ export function createSlowlyApi({ fetchImpl = (...args) => globalThis.fetch(...a
     return url(resource, id, query);
   }
   async function request(method, path, input, { signal, operationKey, timeoutMs = operationKey ? 30000 : undefined } = {}) {
-    if (operationKey !== undefined && (method !== "POST" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationKey))) {
-      throw new SlowlyApiError("A UUID v4 create operation key is required.", { code: "INVALID_ARGUMENT", outcome: "not-sent" });
+    if (operationKey !== undefined && (!["POST", "PATCH", "DELETE"].includes(method) || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationKey))) {
+      throw new SlowlyApiError("A UUID v4 operation key is required.", { code: "INVALID_ARGUMENT", outcome: "not-sent" });
     }
     let serialized;
     try { if (input !== undefined) serialized = JSON.stringify(input); }
@@ -48,10 +48,15 @@ export function createSlowlyApi({ fetchImpl = (...args) => globalThis.fetch(...a
       const code = cause?.name === "TimeoutError" ? "TIMEOUT" : cause?.name === "AbortError" ? "ABORTED" : "NETWORK_ERROR";
       throw new SlowlyApiError("Request did not complete; write outcome may be unknown.", { code, method, path, cause });
     }
-    if (response.ok && operationKey && (response.headers.get("operation-id") !== operationKey ||
-      !((response.status === 201 && response.headers.get("idempotency-status") === "created") ||
-        (response.status === 200 && response.headers.get("idempotency-status") === "replayed")))) {
-      throw new SlowlyApiError("Server did not confirm the idempotent create protocol. Query the operation before proceeding.", { status: response.status, code: "UNPROTECTED_CREATE_RESPONSE", method, path });
+    if (response.ok && operationKey) {
+      const idempotencyStatus = response.headers.get("idempotency-status");
+      const confirmed = method === "POST"
+        ? (response.status === 201 && idempotencyStatus === "created") || (response.status === 200 && idempotencyStatus === "replayed")
+        : response.status === (method === "DELETE" ? 204 : 200) && ["committed", "replayed"].includes(idempotencyStatus);
+      if (response.headers.get("operation-id") !== operationKey || !confirmed) {
+        throw new SlowlyApiError("Server did not confirm the idempotent operation. Query the receipt before proceeding.",
+          { status: response.status, code: method === "POST" ? "UNPROTECTED_CREATE_RESPONSE" : "UNPROTECTED_MUTATION_RESPONSE", method, path });
+      }
     }
     if (response.status === 204 && response.ok) return null;
     let payload;

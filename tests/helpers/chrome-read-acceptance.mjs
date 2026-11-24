@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, deniedId, injectConflict }) {
+export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, deniedId, injectConflict, writeScenario, expectedBoardName }) {
   const binary = [process.env.SLOWLY_CHROME_BIN, ...[process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]
     .filter(Boolean).map(root => join(root, "Google", "Chrome", "Application", "chrome.exe"))].find(path => path && existsSync(path));
   assert.ok(binary, "Chrome binary missing; set SLOWLY_CHROME_BIN");
@@ -51,10 +51,11 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
   };
   async function until(expression) {
     for (let attempt = 0; attempt < 110; attempt++) {
-      if (await evaluate(expression)) return;
+      if (await evaluate(`Boolean(${expression})`)) return;
       await delay(150);
     }
-    throw new Error(`Browser assertion timed out: ${expression}`);
+    const alerts = await evaluate("[...document.querySelectorAll('[role=alert]')].map(item => item.textContent)");
+    throw new Error(`Browser assertion timed out: ${expression}; alerts: ${JSON.stringify(alerts)}`);
   }
   const activate = async workspace => {
     await evaluate(`(() => {
@@ -90,7 +91,7 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
     await activate(workspaceId);
     await until(text("API · 唯讀"));
     await until(text("D1 first task"));
-    assert.equal(await evaluate(`document.querySelector('h1').textContent`), "Updated fixture");
+    assert.equal(await evaluate(`document.querySelector('h1').textContent`), expectedBoardName);
     assert.equal(await evaluate(`[...document.querySelectorAll('.task-card')].map(el=>el.innerText).filter(t=>t.includes('D1')).map(t=>t.includes('first')?'first':'second').join(',')`), "first,second");
     assert.ok(await evaluate(`[...document.querySelectorAll('.column.todo .task-card')].some(el=>el.innerText.includes('D1 first task'))`));
     assert.ok(await evaluate(`document.querySelector('time[datetime="2026-11-25T10:30"]') !== null`));
@@ -115,6 +116,10 @@ export async function checkChromeRead({ origin, workspaceId, secondWorkspaceId, 
     assert.ok(responses.some(response => response.url.includes(encodeURIComponent(secondWorkspaceId)) && response.status === 200));
     const apiRequests = requests.filter(request => request.url.startsWith(origin + "/api/"));
     assert.ok(apiRequests.length >= 4 && apiRequests.every(request => request.method === "GET"));
+    if (writeScenario) {
+      await writeScenario({ send, evaluate, until, activate, requests, responses, text });
+      assert.equal(await evaluate("localStorage.getItem('slowly-workspace-v2')"), initialStorage);
+    }
     return { browser: version.product, apiGetCount: apiRequests.length };
   } finally {
     try { await injectConflict(false); await send("Browser.close", {}, null); }

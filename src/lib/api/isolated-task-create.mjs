@@ -97,6 +97,7 @@ export function isolatedTaskCreateRoutes({ db, configuration = () => process.env
     workspacePost: workspaces.collectionPost, workspacePatch: workspaces.itemPatch, workspaceDelete: workspaces.itemDelete,
     view: createWorkspaceViewApi({ configuration, getRepository, isolation: () => true,
       authorizeRead: id => id === workspaceId ? authorizeWrite(id) : authorizeWrite(id, null, "workspaces"),
+      isolatedCapabilities: env.SLOWLY_PHASE5_D2_UI === "1" ? { isolatedMutationReceipts: true } : undefined,
       getMigrationService: () => createMigrationService(restricted, { tableName }) }),
     receipt: createOperationApi({ configuration, getRepository, async authorizeScope(scope, key) {
       if (scope.resource === "workspaces") {

@@ -59,7 +59,7 @@ export async function readWorkspaceView(repository, workspaceId, { migrationServ
   return snapshot;
 }
 
-export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false, authorizeWorkspace, authorizeRead, cutoverReadiness }) {
+export function createWorkspaceViewApi({ getRepository, getMigrationService, configuration = () => process.env, isolation = () => false, authorizeWorkspace, authorizeRead, cutoverReadiness, isolatedCapabilities }) {
   return async (request, context) => {
     try {
       const isolated = isolation() === true;
@@ -77,6 +77,7 @@ export function createWorkspaceViewApi({ getRepository, getMigrationService, con
         assertReleaseBinding(binding, boundSession);
       }
       const snapshot = await readWorkspaceView(await getRepository(), id, { migrationService });
+      if (isolated && isolatedCapabilities) Object.assign(snapshot.readiness.capabilities, isolatedCapabilities);
       if (binding) {
         requireValue(snapshot.readiness.migration?.migrationId === binding.migrationId && snapshot.readiness.migration.state === "RELEASED" && snapshot.readiness.migration.lockState === "RELEASED", "Approved migration is not released", "MIGRATION_NOT_READY");
         if (boundSession) requireValue(snapshot.readiness.migration.version === boundSession.version, "Bound migration changed", "MIGRATION_NOT_READY");

@@ -118,7 +118,8 @@ try {
       SLOWLY_FORMAL_EVIDENCE_FILE: "", SLOWLY_FORMAL_EVIDENCE_KEY_FILE: "", SLOWLY_CONTROLLED_UI_TABLE: "",
       SLOWLY_CONTROLLED_UI_RUN_ID: "", SLOWLY_MAIN_UI_TEST: "",
       SLOWLY_PHASE5_B1_TABLE: tableName, SLOWLY_PHASE5_B1_WORKSPACE: workspaceId,
-      SLOWLY_PHASE5_B1_PLAN: migrationId, SLOWLY_PHASE5_B1_SOURCE_NAMESPACE: sourceNamespace },
+      SLOWLY_PHASE5_B1_PLAN: migrationId, SLOWLY_PHASE5_B1_SOURCE_NAMESPACE: sourceNamespace,
+      SLOWLY_PHASE5_D2_UI: process.argv.includes("--browser-write") ? "1" : "0" },
   });
   for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => { serverLog = (serverLog + chunk).slice(-8000); });
   const view = (id = workspaceId) => fetch(`${origin}/api/workspaces/${encodeURIComponent(id)}/view`, { signal: AbortSignal.timeout(15000) });
@@ -817,8 +818,17 @@ try {
       console.log(JSON.stringify({ action: "Workspace DELETE", request: fields, status: 204 }));
     });
   }
-  if (process.argv.includes("--browser-read")) {
+  if (process.argv.includes("--browser-read") || process.argv.includes("--browser-write")) {
     const { checkChromeRead } = await import("../tests/helpers/chrome-read-acceptance.mjs");
+    const { checkChromeWrite } = process.argv.includes("--browser-write") ? await import("../tests/helpers/chrome-write-acceptance.mjs") : {};
+    async function setBrowserGrant(enabled) {
+      const current = await get(grant.id);
+      await put({ ...current, version: current.version + 1,
+        taskMutations: enabled ? ["UPDATE", "DELETE"] : [],
+        boardMutations: ["CREATE", "UPDATE", "DELETE"], widgetMutations: ["CREATE", "UPDATE", "DELETE"],
+        workspaceMutations: ["CREATE"] });
+    }
+    if (checkChromeWrite) await setBrowserGrant(true);
     const first = (await expect(post({ ...input, position: 0, data: {
       id: "d1-first", title: "D1 first task", status: "todo", date: "2026-11-25", time: "10:30",
     } }), 201)).body.data;
@@ -836,15 +846,21 @@ try {
       assert.deepEqual(current.tasks.find(item => item.id === first.id), first);
       assert.deepEqual(current.tasks.find(item => item.id === second.id), second);
       assert.deepEqual(current.widgets.find(item => item.id === note.id), note);
-      const result = await checkChromeRead({ origin, workspaceId, secondWorkspaceId: other.id,
+      const result = await checkChromeRead({ origin, workspaceId, secondWorkspaceId: other.id, expectedBoardName: stable.data.name,
         deniedId: `SLOWLY#WORKSPACE#${randomUUID()}`,
-        injectConflict: enabled => put(enabled ? { ...stable, taskCount: stable.taskCount + 1 } : stable) });
+        injectConflict: enabled => put(enabled ? { ...stable, taskCount: stable.taskCount + 1 } : stable),
+        writeScenario: checkChromeWrite && (driver => checkChromeWrite(driver, {
+          origin, workspaceId, view: async () => (await expect(view(), 200)).body.data,
+          setGrant: setBrowserGrant,
+          changeTaskVersion: async id => { const task = await get(id); await put({ ...task, version: task.version + 1 }); },
+        })) });
       console.log(JSON.stringify({ chromeAcceptance: result }));
     });
   }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
+  console.error(error);
   throw error;
 } finally {
   try {
@@ -854,7 +870,10 @@ try {
       if (process.platform === "win32") {
         const stopTree = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
         const [code] = await once(stopTree, "exit");
-        assert.equal(code, 0, "Unable to stop owned Next.js process");
+        if (code !== 0) {
+          await Promise.race([stopped, delay(1000)]);
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        }
       } else child.kill("SIGTERM");
       await stopped;
     }

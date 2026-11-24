@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { defaultWidgetLayout, reorderWidgets, widgetCatalog, WidgetContent, WidgetSettings } from "./widgets";
+import { widgetConfigForTypeChange } from "../lib/client/main-view-model.mjs";
 import "./widget-dashboard.css";
 
 const dragType = "application/x-slowly-widget";
@@ -51,7 +52,7 @@ export function resizeWidget(span, height, deltaX, deltaY, gridWidth) {
   };
 }
 
-function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemove, onMove, onDrop, onEdit, asyncMode = false, version, noteDraftStore }) {
+function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemove, onMove, onDrop, onEdit, asyncMode = false, version, noteDraftStore, typeWrites }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [preview, setPreview] = useState(null);
   const frame = useRef(null);
@@ -84,11 +85,20 @@ function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemov
       <div className="widget-controls">
         <button disabled={!ready} aria-label={`將${entry.name}往前移`} title="往前移" onClick={() => onMove(-1)}>‹</button>
         <button disabled={!ready} aria-label={`將${entry.name}往後移`} title="往後移" onClick={() => onMove(1)}>›</button>
-        {configurable && <button aria-label={`${entry.name}設定`} title="小組件設定" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}>⚙</button>}
+        {(configurable || typeWrites) && <button aria-label={`${entry.name}設定`} title="小組件設定" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}>⚙</button>}
         <button disabled={!ready} aria-label={`移除${entry.name}`} title="移除小組件" onClick={onRemove}>×</button>
       </div>
     </header>
-    {settingsOpen && <div className="widget-settings"><WidgetSettings widget={widget} onConfigure={configure} readOnly={!ready} /></div>}
+    {settingsOpen && <div className="widget-settings">
+      {typeWrites && <label>小組件類型<select disabled={!ready} value={widget.type} onChange={event => {
+        const type = event.target.value;
+        const config = widgetConfigForTypeChange(widget.config);
+        if (Object.keys(config).length !== Object.keys(widget.config ?? {}).length &&
+          !window.confirm("切換類型會清除目前類型的設定與內容，確定繼續？")) return;
+        onUpdate(current => ({ ...current, type, config }), version);
+      }}>{widgetCatalog.map(entry => <option key={entry.type} value={entry.type}>{entry.name}</option>)}</select></label>}
+      <WidgetSettings widget={widget} onConfigure={configure} readOnly={!ready} />
+    </div>}
     <div className="widget-body"><WidgetContent widget={widget} tasks={tasks} now={now} onEdit={onEdit} onConfigure={configure} asyncMode={asyncMode} version={version} readOnly={!ready} noteDraftStore={noteDraftStore} /></div>
     <button className="widget-resize" disabled={!ready} aria-label={`調整${entry.name}大小，可拖曳或使用方向鍵`} title="拖曳調整大小，或使用方向鍵" onPointerDown={event => {
       if (event.button !== 0) return;
@@ -110,7 +120,7 @@ function WidgetCard({ widget, fitted, tasks, now, ready, grid, onUpdate, onRemov
   </section>;
 }
 
-export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, onEdit, asyncMode = false, versions = {}, noteDraftStore }) {
+export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, onEdit, asyncMode = false, versions = {}, noteDraftStore, typeWrites = false }) {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [message, setMessage] = useState("");
   const grid = useRef(null);
@@ -167,7 +177,7 @@ export default function WidgetDashboard({ widgets, tasks, now, ready, onChange, 
       }}><div className="widget-preview" aria-hidden="true">{entry.icon}</div><h3>{entry.name}</h3><p>{entry.description}</p><button className="secondary" disabled={!ready} onClick={() => createWidget(entry.type)}>＋ 加入</button></article>)}</div>
     </section>}
     <div className="widget-grid" ref={grid} onDragOver={event => { if (event.dataTransfer.types.includes(dragType)) event.preventDefault(); }} onDrop={event => dropWidget(event)}>
-      {widgets.map(widget => <WidgetCard key={widget.id} widget={widget} fitted={fitted.get(widget.id)} tasks={tasks} now={now} ready={ready} grid={grid} onDrop={dropWidget} onEdit={onEdit} asyncMode={asyncMode} version={versions[widget.id]} noteDraftStore={noteDraftStore}
+      {widgets.map(widget => <WidgetCard key={widget.id} widget={widget} fitted={fitted.get(widget.id)} tasks={tasks} now={now} ready={ready} grid={grid} onDrop={dropWidget} onEdit={onEdit} asyncMode={asyncMode} version={versions[widget.id]} noteDraftStore={noteDraftStore} typeWrites={typeWrites}
         onUpdate={(update, expectedVersion) => change(current => current.map(item => item.id === widget.id ? update(item) : item), "已儲存。", { widgetId: widget.id, expectedVersion })}
         onRemove={() => {
           if (widget.type === "note" && widget.config.text && !window.confirm("移除這個筆記小組件會一併刪除內容，確定移除？")) return;

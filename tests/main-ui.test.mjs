@@ -8,6 +8,25 @@ import { encodeMainPatch, projectMainView } from "../src/lib/client/main-view-mo
 import { readWorkspaceView, createWorkspaceViewApi } from "../src/lib/api/workspace-view.mjs";
 import { createSlowlyApi } from "../src/lib/client/slowly-api.mjs";
 
+test("mutations require the exact operation receipt confirmation header", async () => {
+  const key = crypto.randomUUID();
+  let operationId = crypto.randomUUID();
+  const api = createSlowlyApi({ fetchImpl: async (_url, options) => {
+    assert.equal(new Headers(options.headers).get("idempotency-key"), key);
+    const headers = { "operation-id": operationId, "idempotency-status": "committed" };
+    return options.method === "DELETE" ? new Response(null, { status: 204, headers })
+      : Response.json({ data: { version: 2 } }, { headers });
+  } });
+  const id = `SLOWLY#TASK#${crypto.randomUUID()}`;
+  const options = { operationKey: key };
+  for (const method of ["updateTask", "deleteTask"]) {
+    await assert.rejects(api[method](id, {}, options), { code: "UNPROTECTED_MUTATION_RESPONSE", outcome: "not-confirmed" });
+  }
+  operationId = key;
+  assert.deepEqual(await api.updateTask(id, {}, options), { version: 2 });
+  assert.equal(await api.deleteTask(id, {}, options), null);
+});
+
 test("default source, dev/ready/workspace gates, readonly and no storage access", async () => {
   const f = await mainUiFixture(); const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new Error("Storage access prohibited"); } });

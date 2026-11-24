@@ -5,7 +5,12 @@ export function validateRecovery(record) {
   if (!record || record.formatVersion !== 1 || !/^[a-f0-9-]{36}$/.test(record.token || "") ||
     !/^SLOWLY#WORKSPACE#[a-f0-9-]{36}$/.test(record.workspaceId || "") ||
     !["create", "update", "delete", "reorder"].includes(record.action) ||
-    (record.action === "create" && (!record.intent || record.intent.operationKey !== record.token || !["boards", "tasks", "widgets"].includes(record.intent.resource) || record.intent.input?.workspaceId !== record.workspaceId))) fail("INVALID_RECOVERY_RECORD");
+    (record.action === "create" && (!record.intent || record.intent.operationKey !== record.token || !["boards", "tasks", "widgets"].includes(record.intent.resource) || record.intent.input?.workspaceId !== record.workspaceId)) ||
+    (record.receiptScope && (!["update", "delete"].includes(record.action) ||
+      !["board", "task", "widget"].includes(record.kind) || record.receiptScope.resource !== `${record.kind}s` ||
+      record.receiptScope.workspaceId !== record.workspaceId ||
+      !new RegExp(`^SLOWLY#${record.kind.toUpperCase()}#[a-f0-9-]{36}$`).test(record.receiptTarget || "") ||
+      (record.kind !== "board" && !/^SLOWLY#BOARD#[a-f0-9-]{36}$/.test(record.receiptScope.boardId || ""))))) fail("INVALID_RECOVERY_RECORD");
   return structuredClone(record);
 }
 export function createRecoveryJournal({ indexedDB = () => globalThis.indexedDB, namespace = "formal" } = {}) {

@@ -6,6 +6,9 @@ const fields = {
   widget: ["type", "span", "height", "manualSize", "config"],
 };
 const configFields = ["text", "minutes", "taskId", "endsAt", "remaining", "showCompleted"];
+export function widgetConfigForTypeChange(config) {
+  return Object.fromEntries(Object.entries(config ?? {}).filter(([key]) => !configFields.includes(key)));
+}
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const fail = (code, message) => { throw new SlowlyApiError(message, { code, outcome: "not-sent" }); };
 const sorted = rows => [...rows].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id));
@@ -65,6 +68,7 @@ export function encodeMainPatch(type, before, after, { subtaskExtensions = false
       return { id: item.id, title: item.title, done: item.done };
     });
   }
+  if (type === "widget" && patch.type) patch.config ??= after.config ?? {};
   if (patch.config) {
     const extras = new Set([...Object.keys(before.config || {}), ...Object.keys(after.config)].filter(key => !configFields.includes(key)));
     for (const key of extras) if (!equal(before.config?.[key], after.config[key])) fail("UNSUPPORTED_FIELD", "不能透過既有 API 修改未知 Widget config。");
