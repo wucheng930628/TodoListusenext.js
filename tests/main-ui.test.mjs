@@ -6,6 +6,7 @@ import { createMainWorkspaceController } from "../src/lib/client/main-workspace-
 import { createMainUiSession } from "../src/lib/client/main-ui-session.mjs";
 import { encodeMainPatch, projectMainView } from "../src/lib/client/main-view-model.mjs";
 import { readWorkspaceView, createWorkspaceViewApi } from "../src/lib/api/workspace-view.mjs";
+import { createSlowlyApi } from "../src/lib/client/slowly-api.mjs";
 
 test("default source, dev/ready/workspace gates, readonly and no storage access", async () => {
   const f = await mainUiFixture(); const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -28,6 +29,57 @@ test("DTO → UI model preserves fields, parent-scoped duplicate frontend IDs, p
   assert.equal(mapping.length, 2); assert.notEqual(mapping[0].databaseId, mapping[1].databaseId);
   const snapshot = f.controller.getSnapshot().projection.snapshot; const malformed = structuredClone(snapshot); malformed.boards[0].widgetsPresence = null;
   assert.throws(() => projectMainView(malformed, f.workspaceId), { code: "WIDGET_PRESENCE_REQUIRED" });
+});
+
+test("read-only activation and refresh surface HTTP and network errors without changing the existing source", async () => {
+  const f = await mainUiFixture(); await f.activate();
+  const snapshot = f.controller.getSnapshot().projection.snapshot;
+  let status = 403;
+  const adapter = createSlowlyApi({ fetchImpl: async (_url, { method, signal }) => {
+    assert.equal(method, "GET"); assert.ok(signal instanceof AbortSignal);
+    if (!status) throw new TypeError("offline");
+    return Response.json(status === 200 ? { data: snapshot } : { error: { code: "TEST_ERROR", message: "Read failed" } }, { status });
+  } });
+  const controller = createMainWorkspaceController({ api: adapter, development: true, readOnly: true, journal: f.journal });
+  await controller.bootstrapRecovery();
+  const activation = { workspaceId: f.workspaceId, apiReady: true };
+  await assert.rejects(controller.activate(activation), { status: 403 });
+  assert.equal(controller.getSnapshot().mode, "localStorage");
+  assert.equal(controller.getSnapshot().startupStatus, "ready");
+  status = 200; await controller.activate(activation);
+  assert.throws(() => controller.authorizeWrites(f.workspaceId), { code: "WRITES_DISABLED" });
+  const previous = controller.getSnapshot().projection;
+  for (const code of [403, 404, 409, 503, null]) {
+    status = code;
+    await assert.rejects(controller.refresh(), code ? { status: code } : { code: "NETWORK_ERROR" });
+    assert.equal(controller.getSnapshot().mode, "api");
+    assert.equal(controller.getSnapshot().status, "error");
+    assert.equal(controller.getSnapshot().projection, previous);
+  }
+});
+
+test("duplicate refresh is coalesced and an aborted snapshot cannot overwrite a newer activation", async () => {
+  const f = await mainUiFixture(); await f.activate();
+  const snapshot = f.controller.getSnapshot().projection.snapshot;
+  let request;
+  let calls = 0;
+  const controller = createMainWorkspaceController({ development: true, journal: f.journal,
+    readView: async (_id, { signal }) => { calls++; return request ? request(signal) : snapshot; } });
+  const scope = { workspaceId: f.workspaceId, apiReady: true };
+  await controller.activate(scope);
+  const old = Promise.withResolvers();
+  let oldSignal;
+  request = signal => { oldSignal = signal; return old.promise; };
+  const first = controller.refresh();
+  assert.equal(controller.refresh(), first);
+  assert.equal(calls, 2);
+  request = undefined;
+  await controller.activate(scope);
+  assert.equal(oldSignal.aborted, true);
+  const current = controller.getSnapshot().projection;
+  old.resolve({ ...snapshot, workspace: { ...snapshot.workspace, data: { stale: true } } });
+  await first;
+  assert.equal(controller.getSnapshot().projection, current);
 });
 
 test("Task create/edit/subtasks/notes/priority/status/order/delete round-trip through actual API", async () => {

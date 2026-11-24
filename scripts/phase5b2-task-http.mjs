@@ -817,6 +817,31 @@ try {
       console.log(JSON.stringify({ action: "Workspace DELETE", request: fields, status: 204 }));
     });
   }
+  if (process.argv.includes("--browser-read")) {
+    const { checkChromeRead } = await import("../tests/helpers/chrome-read-acceptance.mjs");
+    const first = (await expect(post({ ...input, position: 0, data: {
+      id: "d1-first", title: "D1 first task", status: "todo", date: "2026-11-25", time: "10:30",
+    } }), 201)).body.data;
+    const second = (await expect(post({ ...input, position: 1000, data: { id: "d1-second", title: "D1 second task", status: "todo" } }), 201)).body.data;
+    const fetchWrite = (path, fields) => fetch(origin + path, {
+      method: "POST", headers: { origin, "content-type": "application/json", "idempotency-key": randomUUID() }, body: JSON.stringify(fields),
+    });
+    const note = (await expect(fetchWrite("/api/widgets", { workspaceId, boardId, position: 1000,
+      data: { id: "d1-note", type: "note", span: 6, height: 240, config: { text: "D1 saved note" } } }), 201)).body.data;
+    const other = (await expect(fetchWrite("/api/workspaces", { data: { name: "D1 empty Workspace" } }), 201)).body.data;
+    const stable = await get(boardId);
+    await check("D1 real Chrome source switching, Workspace View, locally seeded data, conflict and reload", async () => {
+      const snapshot = (await expect(view(), 200)).body.data;
+      const current = snapshot.boards.find(row => row.board.id === boardId);
+      assert.deepEqual(current.tasks.find(item => item.id === first.id), first);
+      assert.deepEqual(current.tasks.find(item => item.id === second.id), second);
+      assert.deepEqual(current.widgets.find(item => item.id === note.id), note);
+      const result = await checkChromeRead({ origin, workspaceId, secondWorkspaceId: other.id,
+        deniedId: `SLOWLY#WORKSPACE#${randomUUID()}`,
+        injectConflict: enabled => put(enabled ? { ...stable, taskCount: stable.taskCount + 1 } : stable) });
+      console.log(JSON.stringify({ chromeAcceptance: result }));
+    });
+  }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
