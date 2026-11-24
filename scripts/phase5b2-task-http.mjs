@@ -79,6 +79,8 @@ const close = server => new Promise((done, fail) => server.close(error => error 
 let created = false;
 let child;
 let proxy;
+let proxyPort;
+let afterCommit;
 let serverLog = "";
 let passed = 0;
 async function check(name, scenario) {
@@ -230,24 +232,24 @@ try {
     assert.deepEqual(unknown.exportIntent().input, input);
   });
   await check("real HTTP response withheld after commit, timeout recovered through receipt", async () => {
-    const after = Promise.withResolvers();
+    afterCommit = Promise.withResolvers();
     proxy = createServer(async (request, response) => {
       try {
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
-        const upstream = await fetch(`${origin}/api/tasks`, { method: "POST", body: Buffer.concat(chunks),
+        const upstream = await fetch(origin + request.url, { method: request.method, body: Buffer.concat(chunks),
           headers: { origin, "content-type": "application/json", "idempotency-key": request.headers["idempotency-key"] },
           signal: AbortSignal.timeout(10000) });
-        after.resolve({ status: upstream.status, body: await upstream.json() });
+        afterCommit.resolve({ status: upstream.status, body: upstream.status === 204 ? null : await upstream.json() });
         // Deliberately withhold the server reply until the client aborts.
-      } catch (error) { after.reject(error); response.destroy(); }
+      } catch (error) { afterCommit.reject(error); response.destroy(); }
     });
-    const proxyPort = await listen(proxy);
+    proxyPort = await listen(proxy);
     const recoverApi = createSlowlyApi({ fetchImpl: (path, options) => fetch((options.method === "POST" ? `http://127.0.0.1:${proxyPort}` : origin) + path, options) });
     const original = { ...input, position: 1, data: { ...input.data, id: "timeout", status: "todo" } };
     const intent = createSafeCreateIntent(recoverApi, "tasks", original, { operationKey: randomUUID() });
     await assert.rejects(intent.send({ timeoutMs: 1500 }), { code: "TIMEOUT", outcome: "not-confirmed" });
-    const committed = await after.promise;
+    const committed = await afterCommit.promise;
     assert.equal(committed.status, 201);
     assert.deepEqual(intent.exportIntent().input, original);
     const confirmed = await intent.lookup();
@@ -280,6 +282,133 @@ try {
     assert.equal(latest.boards[0].tasks.length, (await get(boardId)).taskCount);
     assert.equal((await get(workspaceId)).version, workspace.version);
   });
+  if (process.argv.includes("--task-mutations")) {
+    const mutate = (method, fields, operationKey, target = task.id, viaProxy = false) => fetch(
+      `${viaProxy ? `http://127.0.0.1:${proxyPort}` : origin}/api/tasks/${encodeURIComponent(target)}`, {
+        method, signal: AbortSignal.timeout(viaProxy ? 1500 : 15000),
+        headers: { origin, "content-type": "application/json", ...(operationKey ? { "idempotency-key": operationKey } : {}) },
+        body: JSON.stringify(fields),
+      },
+    );
+    const base = { workspaceId, boardId, version: task.version };
+    const patch = { ...base, data: { status: "done", notes: "Saved through HTTP", date: "2026-11-25" } };
+    const grantForMutations = { ...grant, version: 2, taskMutations: ["UPDATE", "DELETE"] };
+    const methods = [["PATCH", patch], ["DELETE", base]];
+    await check("C1 both methods enforce authorization, required scope, ownership and versions", async () => {
+      for (const [method, fields] of methods) await expect(mutate(method, fields), 403, "FORBIDDEN");
+      for (const change of [{ state: "REVOKED" }, { expiresAt: 1 }]) {
+        await put({ ...grantForMutations, ...change });
+        for (const [method, fields] of methods) await expect(mutate(method, fields), 403, "FORBIDDEN");
+      }
+      await put(grantForMutations);
+      for (const [method, fields] of methods) {
+        await expect(mutate(method, { ...fields, workspaceId: undefined }), 400, "VALIDATION");
+        await expect(mutate(method, { ...fields, workspaceId: `SLOWLY#WORKSPACE#${randomUUID()}` }), 403, "FORBIDDEN");
+        await expect(mutate(method, { ...fields, boardId: `SLOWLY#BOARD#${randomUUID()}` }), 403, "OWNERSHIP");
+        await expect(mutate(method, { ...fields, version: task.version + 1 }), 409, "CONFLICT");
+        await expect(mutate(method, fields, null, `SLOWLY#TASK#${randomUUID()}`), 404, "NOT_FOUND");
+      }
+      await expect(mutate("PATCH", { ...base, data: { completedAt: now } }), 400, "VALIDATION");
+      const target = await get(task.id);
+      await put({ ...target, migrationLock: true });
+      for (const [method, fields] of methods) await expect(mutate(method, fields), 409, "MIGRATION_LOCKED");
+      await put(target);
+      const snapshot = (await expect(view(), 200)).body.data;
+      const todo = snapshot.boards[0].tasks.find(item => item.data.status === "todo");
+      await expect(mutate("PATCH", { ...base, version: todo.version, data: { status: "doing" } }, null, todo.id), 409, "WIP_LIMIT");
+    });
+    await check("C1 cancelled PATCH and DELETE leave task, parent and operation receipt unchanged", async () => {
+      const target = await get(task.id);
+      const parent = await get(boardId);
+      await put({ ...parent, taskCount: 0, doingCount: 0 });
+      await expect(mutate("DELETE", base), 409, "CONFLICT");
+      await put(parent);
+      for (const [method, fields] of methods) {
+        const mutationKey = randomUUID();
+        // Exercise the transaction serialization failure before dispatch.
+        const brokenParent = { ...parent, version: Number.MAX_SAFE_INTEGER };
+        await put(brokenParent);
+        await expect(mutate(method, fields, mutationKey), 500, "INTERNAL");
+        assert.deepEqual(await get(task.id), target);
+        assert.deepEqual(await get(boardId), brokenParent);
+        assert.equal(await get(receiptId(mutationKey)), undefined);
+        assert.equal((await expect(receipt(mutationKey), 404, "OPERATION_NOT_FOUND")).body.error.state, "NOT_FOUND");
+        await put(parent);
+      }
+    });
+    let updated;
+    await check("C1 PATCH timeout recovers exact receipt, completedAt and fresh Workspace View", async () => {
+      const mutationKey = randomUUID();
+      const parent = await get(boardId);
+      afterCommit = Promise.withResolvers();
+      await assert.rejects(mutate("PATCH", patch, mutationKey, task.id, true), { name: "TimeoutError" });
+      const written = await afterCommit.promise;
+      assert.equal(written.status, 200);
+      updated = written.body.data;
+      assert.equal(updated.version, task.version + 1);
+      assert.ok(Number.isFinite(Date.parse(updated.data.completedAt)));
+      assert.equal(updated.data.notes, patch.data.notes);
+      assert.equal(updated.data.date, patch.data.date);
+      const saved = (await expect(receipt(mutationKey), 200)).body.data;
+      assert.equal(saved.action, "UPDATE");
+      assert.equal(saved.state, "CONFIRMED");
+      assert.deepEqual(saved.result, updated);
+      const replay = await expect(mutate("PATCH", patch, mutationKey), 200);
+      assert.equal(replay.response.headers.get("idempotency-status"), "replayed");
+      assert.deepEqual(replay.body.data, updated);
+      await expect(mutate("PATCH", { ...patch, data: { notes: "Different" } }, mutationKey), 409, "OPERATION_CONFLICT");
+      await expect(mutate("PATCH", patch), 409, "CONFLICT");
+      assert.equal((await get(boardId)).version, parent.version + 1);
+      assert.equal((await get(boardId)).taskCount, parent.taskCount);
+      assert.equal((await get(boardId)).doingCount, parent.doingCount - 1);
+      const snapshot = (await expect(view(), 200)).body.data;
+      assert.deepEqual(snapshot.boards[0].tasks.find(item => item.id === task.id), updated);
+      assert.equal(snapshot.workspace.version, workspace.version);
+      console.log(JSON.stringify({ method: "PATCH", target: task.id, request: patch, status: 200, result: updated }));
+    });
+    await check("C1 concurrent stale versions cannot both commit", async () => {
+      const parent = await get(boardId);
+      const edits = ["first", "second"].map(notes => ({ key: randomUUID(), fields: { ...base, version: updated.version, data: { notes } } }));
+      const result = await Promise.all(edits.map(async edit => {
+        const response = await mutate("PATCH", edit.fields, edit.key);
+        return { ...edit, status: response.status, body: await response.json() };
+      }));
+      assert.deepEqual(result.map(item => item.status).sort(), [200, 409]);
+      const accepted = result.find(item => item.status === 200);
+      const rejected = result.find(item => item.status === 409);
+      assert.equal(rejected.body.error.code, "CONFLICT");
+      assert.equal(await get(receiptId(rejected.key)), undefined);
+      assert.equal((await get(boardId)).version, parent.version + 1);
+      assert.equal(accepted.body.data.data.completedAt, updated.data.completedAt);
+      updated = accepted.body.data;
+    });
+    await check("C1 DELETE timeout resolves to durable tombstone; replay leaves count unchanged", async () => {
+      const mutationKey = randomUUID();
+      const fields = { ...base, version: updated.version };
+      const parent = await get(boardId);
+      afterCommit = Promise.withResolvers();
+      await assert.rejects(mutate("DELETE", fields, mutationKey, task.id, true), { name: "TimeoutError" });
+      assert.equal((await afterCommit.promise).status, 204);
+      const saved = (await expect(receipt(mutationKey), 200)).body.data;
+      assert.equal(saved.action, "DELETE");
+      assert.equal(saved.state, "CONFIRMED");
+      assert.equal(saved.targetId, task.id);
+      assert.equal(saved.result, null);
+      assert.equal(await get(task.id), undefined);
+      const replay = await mutate("DELETE", fields, mutationKey);
+      assert.equal(replay.status, 204);
+      assert.equal(replay.headers.get("idempotency-status"), "replayed");
+      assert.equal(await replay.text(), "");
+      await expect(mutate("DELETE", fields), 404, "NOT_FOUND");
+      await expect(mutate("PATCH", patch, mutationKey), 409, "OPERATION_CONFLICT");
+      assert.equal((await get(boardId)).version, parent.version + 1);
+      assert.equal((await get(boardId)).taskCount, parent.taskCount - 1);
+      const snapshot = (await expect(view(), 200)).body.data;
+      assert.equal(snapshot.boards[0].tasks.some(item => item.id === task.id), false);
+      assert.equal(snapshot.boards[0].tasks.length, parent.taskCount - 1);
+      console.log(JSON.stringify({ method: "DELETE", target: task.id, request: fields, status: 204 }));
+    });
+  }
   console.log(`HTTP integration: ${passed}/${passed} scenario groups passed`);
 } catch (error) {
   console.error(serverLog);
